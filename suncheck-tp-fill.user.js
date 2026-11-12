@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TP Fill
 // @namespace    https://github.com/mobility22/SunCHECK-TP-Fill
-// @version      1.0
+// @version      1.1
 // @description  Fill SunCHECK Peace temperature and pressure on Photon/Electron constancy (never Approve/Submit)
 // @match        http://cnrrtrocperfx.rrt.ca.kp.org/*
 // @match        https://cnrrtrocperfx.rrt.ca.kp.org/*
@@ -13,23 +13,31 @@
 (function () {
   'use strict';
   const TAG = '[TP Fill]';
-  const SCRIPT_VERSION = '1.0';
+  const SCRIPT_VERSION = '1.1';
   const log = (...a) => console.log(TAG, ...a);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   const GATE_RE = /peace/i;
   const GATE_TIMEOUT_MS = 30000;
+  const INPUT_WAIT_MS = 5000;
   const HEADER_SEL = 'header,[role="banner"],[class*="title" i],[class*="header" i],[class*="toolbar" i],[class*="navbar" i],[class*="appbar" i],[class*="app-bar" i],[class*="topbar" i],[class*="top-bar" i],h1,h2';
   const STORE_KEY = 'suncheck-tp-fill-v1';
   const BTN_ID = 'suncheck-tp-btn';
   const PANEL_ID = 'suncheck-tp-panel';
   const TEMP_LABEL_RE = /^\s*Temperature(\s*\([^)]*\))?\s*$/i;
   const PRESS_LABEL_RE = /^\s*Pressure(\s*\([^)]*\))?\s*$/i;
+  const TEMP_WORD_RE = /\btemperature\b/i;
+  const PRESS_WORD_RE = /\bpressure\b/i;
+  const PTP_RE = /\bptp\b/i;
+  const UNIT_C_RE = /^°?C$/i;
+  const UNIT_PRESS_RE = /kPa|mmHg/i;
+  const ATTR_KEYS = ['aria-label', 'placeholder', 'title', 'name', 'id', 'formcontrolname', 'formControlName', 'ng-reflect-name', 'ng-reflect-form-control-name'];
   const FORBIDDEN_CLICK_RE = /^(pass(\s*all)?|fail(\s*all)?|submit|complete|approve|unapprove|delete|cancel|save)$/i;
   const FORBIDDEN_WORD_RE = /\b(pass\s*all|fail\s*all|submit|complete|approve|unapprove|delete)\b/i;
   const ICP_RE = /quad\s*wedges?|\bICP\b/i;
   const TREE_SEL = 'nav,aside,[class*="tree"],[class*="sidebar"],[class*="menu"],[class*="nav"],[role="tree"]';
   const CLICKABLE_SEL = 'a,button,[role="treeitem"],[role="tab"],[role="button"],li,span,div,label';
+  const SKIP_INPUT_TYPES = /^(button|submit|reset|checkbox|radio|file|hidden|image|color|range)$/i;
 
   const TARGETS = [
     { group: 'Photon constancy', energy: '6 MV' },
@@ -45,7 +53,6 @@
   ];
 
   const isExec = () => location.hash.includes('#/Routine/Execution');
-  const vis = el => el && el.offsetParent !== null;
   const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
   const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
 
@@ -73,6 +80,13 @@
     const m = /^(\d+(?:\.\d+)?)\s*MeV$/i.exec(b);
     return !!(m && new RegExp('^' + m[1] + '$').test(a));
   }
+  function energyInText(text, energy) {
+    const a = norm(text), b = norm(energy);
+    if (!a || !b) return false;
+    if (new RegExp('(^|[^A-Za-z0-9])' + b.replace(/\s+/g, '\\s*') + '([^A-Za-z0-9]|$)', 'i').test(a)) return true;
+    const m = /^(\d+(?:\.\d+)?)\s*MeV$/i.exec(b);
+    return !!(m && new RegExp('(^|[^0-9])' + m[1] + '([^0-9]|$)').test(a) && /MeV/i.test(a));
+  }
   function temperatureLabelMatches(text) { return TEMP_LABEL_RE.test(norm(text)); }
   function pressureLabelMatches(text) { return PRESS_LABEL_RE.test(norm(text)); }
   function isForbiddenClickText(text) {
@@ -80,6 +94,7 @@
     return !t ? false : (FORBIDDEN_CLICK_RE.test(t) || FORBIDDEN_WORD_RE.test(t));
   }
   function targetName(t) { return t.group.replace(/ constancy/i, '') + ' ' + t.energy; }
+  function groupKind(groupName) { return /photon/i.test(groupName) ? 'Photon' : 'Electron'; }
 
   function headerHasPeace() {
     try {
@@ -114,6 +129,25 @@
   function ourUi(el) {
     return !!(el && el.closest && el.closest('#' + PANEL_ID + ',#' + BTN_ID));
   }
+  function vis(el) {
+    if (!el || ourUi(el) || el.hidden) return false;
+    if (el.offsetParent !== null) return true;
+    try {
+      const st = el.ownerDocument && el.ownerDocument.defaultView && el.ownerDocument.defaultView.getComputedStyle(el);
+      if (st && (st.display === 'none' || st.visibility === 'hidden')) return false;
+      if (st && st.position === 'fixed' && st.display !== 'none') return true;
+    } catch (e) { /* ignore */ }
+    return false;
+  }
+  function isShown(el) {
+    if (!el || ourUi(el) || el.hidden) return false;
+    if (vis(el)) return true;
+    try {
+      const st = el.ownerDocument && el.ownerDocument.defaultView && el.ownerDocument.defaultView.getComputedStyle(el);
+      if (st && (st.display === 'none' || st.visibility === 'hidden')) return false;
+    } catch (e) { /* ignore */ }
+    return el.isConnected !== false;
+  }
   function ownLabel(el) {
     if (!el || ourUi(el)) return '';
     const aria = (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) || '';
@@ -129,26 +163,10 @@
       }
     }
     if (texts.length) return texts[0];
+    if (el.children && el.children.length > 1) return '';
     const t = norm(el.innerText || el.textContent || '');
     if (!t) return '';
     return t.split('\n')[0].trim();
-  }
-  function textInputs(root) {
-    return [...(root || document).querySelectorAll('input[type="text"],input[type="number"],input:not([type]),textarea')]
-      .filter(el => vis(el) && !ourUi(el) && !el.disabled && !el.readOnly);
-  }
-  function section(name) {
-    const re = new RegExp(name, 'i');
-    const heads = [...document.querySelectorAll('h1,h2,h3,h4,h5,div,span,a,legend,label')]
-      .filter(e => vis(e) && !ourUi(e) && e.children.length <= 3 && re.test(e.textContent) && norm(e.textContent).length < 90 &&
-        !e.closest('nav,aside,[class*="tree"],[class*="sidebar"],[class*="menu"]'));
-    for (const h of heads) {
-      let n = h;
-      for (let i = 0; i < 8 && n; i++, n = n.parentElement) {
-        if (n.querySelector('input,textarea')) return n;
-      }
-    }
-    return null;
   }
 
   function candidates(root, sel) {
@@ -156,7 +174,7 @@
   }
   function treeRoots() {
     const nodes = [...document.querySelectorAll(TREE_SEL)].filter(el => vis(el) && !ourUi(el));
-    return nodes.length ? nodes : [document.body];
+    return nodes.length ? nodes : [];
   }
   function pickShortest(hits) {
     hits.sort((a, b) => {
@@ -168,7 +186,8 @@
   }
   function findGroupItem(groupName) {
     const hits = [];
-    for (const root of treeRoots()) {
+    const roots = treeRoots();
+    for (const root of (roots.length ? roots : [document.body])) {
       for (const el of candidates(root)) {
         if (isGroupLabel(ownLabel(el), groupName)) hits.push(el);
       }
@@ -176,10 +195,51 @@
     return pickShortest(hits);
   }
   function mainRoot() {
-    const tree = document.querySelector(TREE_SEL);
     const main = document.querySelector('main,[role="main"],[class*="content"],[class*="detail"],[class*="workspace"]');
-    if (main && vis(main) && !ourUi(main)) return main;
+    if (main && isShown(main) && !ourUi(main)) return main;
     return document.body;
+  }
+  function isUnderIcp(el) {
+    let n = el;
+    for (let i = 0; i < 16 && n && n !== document.body; i++, n = n.parentElement) {
+      if (isIcpLabel(ownLabel(n))) return true;
+    }
+    return false;
+  }
+  function nearestGroupName(el) {
+    let n = el;
+    for (let i = 0; i < 16 && n && n !== document.body; i++, n = n.parentElement) {
+      const lab = ownLabel(n);
+      if (isIcpLabel(lab)) return null;
+      if (isGroupLabel(lab, 'Photon constancy')) return 'Photon constancy';
+      if (isGroupLabel(lab, 'Electron constancy')) return 'Electron constancy';
+    }
+    return null;
+  }
+  function findEnergyTreeRow(energy, groupName) {
+    const groupEl = findGroupItem(groupName);
+    const hits = [];
+    const seen = new Set();
+    const roots = [];
+    if (groupEl) {
+      roots.push(groupEl);
+      if (groupEl.parentElement) roots.push(groupEl.parentElement);
+    }
+    roots.push(...treeRoots());
+    for (const root of roots) {
+      if (!root) continue;
+      for (const el of candidates(root)) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        if (!energyLabelMatches(ownLabel(el), energy)) continue;
+        if (isUnderIcp(el)) continue;
+        const g = nearestGroupName(el);
+        if (g && g !== groupName) continue;
+        if (!g && groupEl && !(groupEl.contains(el) || (groupEl.parentElement && groupEl.parentElement.contains(el)))) continue;
+        hits.push(el);
+      }
+    }
+    return pickShortest(hits);
   }
   function findEnergyTab(energy) {
     const roots = [];
@@ -196,55 +256,309 @@
         if (energyLabelMatches(ownLabel(el), energy)) hits.push(el);
       }
     }
-    if (hits.length) return pickShortest(hits);
-    const treeHits = [];
-    for (const root of treeRoots()) {
-      for (const el of candidates(root)) {
-        if (energyLabelMatches(ownLabel(el), energy)) treeHits.push(el);
-      }
-    }
-    return pickShortest(treeHits);
+    return pickShortest(hits);
   }
 
-  function inputFromLabelEl(lab) {
-    if (!lab) return null;
-    if (lab.htmlFor) {
-      const inp = document.getElementById(lab.htmlFor);
-      if (inp && vis(inp) && !ourUi(inp)) return inp;
+  function attrMap(el) {
+    const out = {};
+    for (const k of ATTR_KEYS) {
+      const v = el.getAttribute && el.getAttribute(k);
+      if (v) out[k] = v;
     }
-    const inner = lab.querySelector && lab.querySelector('input,textarea');
-    if (inner && vis(inner) && !ourUi(inner)) return inner;
-    let n = lab;
-    for (let i = 0; i < 5 && n; i++, n = n.parentElement) {
-      const ins = textInputs(n);
-      if (ins.length === 1) return ins[0];
-      if (ins.length > 1 && i === 0) {
-        const after = ins.find(inp => lab.compareDocumentPosition(inp) & Node.DOCUMENT_POSITION_FOLLOWING);
-        if (after) return after;
+    return out;
+  }
+  function attrBlob(el) { return norm(Object.values(attrMap(el)).join(' ')); }
+  function isPtpInput(el, nearbyTexts) {
+    if (PTP_RE.test(attrBlob(el))) return true;
+    return (nearbyTexts || []).some(t => /^PTP$/i.test(norm(t)));
+  }
+  function isUnitToken(t) {
+    const s = norm(t);
+    return !!(s && (UNIT_C_RE.test(s) || UNIT_PRESS_RE.test(s) && s.length <= 16));
+  }
+  function isInputish(node) {
+    if (!node || node.nodeType !== 1) return false;
+    const tag = (node.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea') return true;
+    return !!(node.querySelector && node.querySelector('input,textarea'));
+  }
+  function firstLineOf(el) {
+    if (!el || el.nodeType !== 1) return '';
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag === 'script' || tag === 'style' || tag === 'noscript') return '';
+    return norm((el.innerText || el.textContent || '').split('\n')[0]);
+  }
+  function isFieldLabel(t) {
+    const s = norm(t);
+    if (!s || s.length > 80) return false;
+    return temperatureLabelMatches(s) || pressureLabelMatches(s) || /^PTP$/i.test(s) ||
+      (TEMP_WORD_RE.test(s) && !PRESS_WORD_RE.test(s)) ||
+      (PRESS_WORD_RE.test(s) && !TEMP_WORD_RE.test(s));
+  }
+  function collectNearby(el) {
+    const texts = [];
+    const units = [];
+    const add = raw => {
+      const t = norm(raw);
+      if (!t || t.length > 80) return;
+      if (isUnitToken(t)) units.push(t);
+      texts.push(t);
+    };
+    if (el.id) {
+      try {
+        const esc = (window.CSS && CSS.escape) ? CSS.escape(el.id) : el.id.replace(/"/g, '');
+        const lab = el.ownerDocument.querySelector('label[for="' + esc + '"]');
+        if (lab && !ourUi(lab)) add(lab.innerText || lab.textContent);
+      } catch (e) { /* ignore */ }
+    }
+    if (el.labels) for (const lab of el.labels) if (!ourUi(lab)) add(lab.innerText || lab.textContent);
+    const prev = [];
+    let sib = el.previousElementSibling;
+    while (sib) {
+      if (isInputish(sib)) break;
+      prev.push(sib);
+      sib = sib.previousElementSibling;
+    }
+    for (const s of prev) {
+      const t = firstLineOf(s);
+      add(t);
+      if (isFieldLabel(t)) break;
+    }
+    sib = el.nextElementSibling;
+    while (sib) {
+      if (isInputish(sib)) break;
+      const t = firstLineOf(sib);
+      if (isFieldLabel(t) && !isUnitToken(t)) break;
+      add(t);
+      sib = sib.nextElementSibling;
+    }
+    if (texts.some(isFieldLabel)) return { texts, units };
+    let n = el;
+    for (let i = 0; i < 4 && n && n !== document.body && !ourUi(n); i++) {
+      const p = n.parentElement;
+      if (!p || ourUi(p)) break;
+      const pTag = (p.tagName || '').toLowerCase();
+      if (pTag === 'script' || pTag === 'style' || pTag === 'html') break;
+      for (const child of p.childNodes) {
+        if (child === n) continue;
+        if (child.nodeType === 3) add(child.textContent);
+        else if (child.nodeType === 1 && child.children.length === 0 && !isInputish(child)) {
+          const tag = (child.tagName || '').toLowerCase();
+          if (tag !== 'script' && tag !== 'style') add(child.innerText || child.textContent);
+        }
       }
+      if (texts.some(isFieldLabel)) break;
+      if (p.querySelectorAll('input,textarea').length > 2) break;
+      n = p;
     }
-    let sib = lab.nextElementSibling;
-    for (let i = 0; i < 4 && sib; i++, sib = sib.nextElementSibling) {
-      if ((sib.matches && sib.matches('input,textarea')) && vis(sib)) return sib;
-      const inner2 = sib.querySelector && sib.querySelector('input,textarea');
-      if (inner2 && vis(inner2)) return inner2;
-    }
+    return { texts, units };
+  }
+  function kindFromAttrs(blob) {
+    if (!blob) return null;
+    if (PTP_RE.test(blob)) return 'ptp';
+    const hasTemp = /temperature/i.test(blob);
+    const hasPress = /pressure/i.test(blob);
+    if (hasTemp && !hasPress) return 'temperature';
+    if (hasPress && !hasTemp) return 'pressure';
     return null;
   }
-  function findLabeledInput(labelFn) {
-    const root = section('Environmentals') || section('Environmental') || mainRoot();
-    const labelEls = [...root.querySelectorAll('label,span,div,p,th,td,h1,h2,h3,h4,h5,legend')].filter(el => vis(el) && !ourUi(el) && el.children.length <= 4);
-    for (const el of labelEls) {
-      const t = norm(el.innerText || el.textContent || '');
-      if (!t || t.length > 80 || !labelFn(t)) continue;
-      const inp = inputFromLabelEl(el);
-      if (inp) return inp;
+  function kindFromNearby(texts, units) {
+    const exactTemp = texts.some(temperatureLabelMatches);
+    const exactPress = texts.some(pressureLabelMatches);
+    if (exactTemp && !exactPress) return 'temperature';
+    if (exactPress && !exactTemp) return 'pressure';
+    if (exactTemp && exactPress) {
+      for (const s of texts) {
+        if (temperatureLabelMatches(s)) return 'temperature';
+        if (pressureLabelMatches(s)) return 'pressure';
+      }
     }
-    for (const inp of textInputs(root)) {
-      const aria = (inp.getAttribute('aria-label') || inp.getAttribute('placeholder') || inp.title || '').trim();
-      if (aria && labelFn(aria)) return inp;
-    }
+    const hasTemp = texts.some(s => TEMP_WORD_RE.test(s));
+    const hasPress = texts.some(s => PRESS_WORD_RE.test(s));
+    const hasC = units.some(u => UNIT_C_RE.test(u));
+    const hasKpa = units.some(u => UNIT_PRESS_RE.test(u));
+    if (hasTemp && !hasPress) return 'temperature';
+    if (hasPress && !hasTemp) return 'pressure';
+    if (hasKpa && !hasTemp) return 'pressure';
+    if (hasC && hasTemp && !hasPress) return 'temperature';
     return null;
+  }
+  function classifyInput(el) {
+    const nearby = collectNearby(el);
+    if (isPtpInput(el, nearby.texts)) return { kind: 'ptp', nearby };
+    const fromAttr = kindFromAttrs(attrBlob(el));
+    if (fromAttr === 'ptp') return { kind: 'ptp', nearby };
+    if (fromAttr) return { kind: fromAttr, nearby, via: 'attr' };
+    const fromNear = kindFromNearby(nearby.texts, nearby.units);
+    if (fromNear) return { kind: fromNear, nearby, via: 'near' };
+    return { kind: null, nearby };
+  }
+  function isEditableInput(el) {
+    if (!el || ourUi(el)) return false;
+    const tag = (el.tagName || '').toLowerCase();
+    if (tag !== 'input' && tag !== 'textarea') return false;
+    if (el.disabled || el.readOnly) return false;
+    if (SKIP_INPUT_TYPES.test(el.type || '')) return false;
+    return true;
+  }
+
+  function dosimetryRe(groupName) {
+    return new RegExp('Dosimetry\\s*[-–—]\\s*' + groupKind(groupName) + '\\s*constancy', 'i');
+  }
+  function headerMatchesEnergy(el, target) {
+    const re = dosimetryRe(target.group);
+    const own = norm(el.innerText || el.textContent || '').split('\n').slice(0, 3).join(' ');
+    if (own.length > 160) return false;
+    const parentBits = [];
+    if (el.parentElement) {
+      for (const sib of el.parentElement.children) {
+        const t = norm(sib.innerText || sib.textContent || '').split('\n')[0];
+        if (t && t.length < 80) parentBits.push(t);
+      }
+    }
+    const ctx = own + ' ' + parentBits.join(' ');
+    if (!re.test(own) && !re.test(ctx)) return false;
+    return energyInText(ctx, target.energy) || energyLabelMatches(ownLabel(el), target.energy) || parentBits.some(t => energyLabelMatches(t, target.energy));
+  }
+  function findEnergySection(target) {
+    const re = dosimetryRe(target.group);
+    const nodes = [...document.querySelectorAll('h1,h2,h3,h4,h5,div,span,a,p,strong,b,legend')].filter(el => {
+      if (!isShown(el) || ourUi(el) || (el.closest && el.closest(TREE_SEL))) return false;
+      const t = norm((el.innerText || el.textContent || '').split('\n')[0]);
+      return t.length < 120 && re.test(t);
+    });
+    const matched = nodes.filter(el => headerMatchesEnergy(el, target));
+    const headers = matched.length ? matched : nodes;
+    if (!headers.length) return null;
+    let best = headers[0];
+    for (const h of headers) {
+      if (matched.includes(h) && !matched.includes(best)) best = h;
+    }
+    let n = best;
+    for (let i = 0; i < 10 && n && n !== document.body; i++, n = n.parentElement) {
+      const ins = n.querySelectorAll('input,textarea');
+      if (ins.length >= 1 && ins.length < 40) return n;
+    }
+    return best.parentElement || best;
+  }
+  function scrollEl(el) {
+    if (!el || typeof el.scrollIntoView !== 'function') return;
+    try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); }
+    catch (e) { try { el.scrollIntoView(); } catch (e2) { /* ignore */ } }
+  }
+  function scrollPaneDown(pane) {
+    if (!pane) return;
+    try {
+      if (pane.scrollHeight && pane.scrollHeight > pane.clientHeight + 20) {
+        pane.scrollTop = Math.min(pane.scrollTop + Math.max(180, pane.clientHeight * 0.6), pane.scrollHeight);
+      } else if (pane.ownerDocument && pane.ownerDocument.defaultView) {
+        pane.ownerDocument.defaultView.scrollBy(0, 240);
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  function emptyDebug() {
+    return {
+      inputsScanned: 0,
+      editable: 0,
+      readonlyOrDisabled: 0,
+      excludedUi: 0,
+      excludedPtp: 0,
+      hiddenType: 0,
+      attrAria: 0,
+      attrPlaceholder: 0,
+      attrTitle: 0,
+      attrName: 0,
+      attrId: 0,
+      attrFormcontrol: 0,
+      tempAttrHits: 0,
+      pressAttrHits: 0,
+      tempNearHits: 0,
+      pressNearHits: 0,
+      unitCNear: 0,
+      unitKpaNear: 0,
+      sectionFound: false,
+      headerMatchedEnergy: false
+    };
+  }
+  function findTempAndPressure(target) {
+    const debug = emptyDebug();
+    const section = findEnergySection(target);
+    debug.sectionFound = !!section;
+    debug.headerMatchedEnergy = !!(section && headerMatchesEnergy(section, target) || (section && [...section.querySelectorAll('h1,h2,h3,h4,h5,div,span')].some(el => headerMatchesEnergy(el, target))));
+    const roots = [];
+    if (section) roots.push(section);
+    const main = mainRoot();
+    if (!section || section !== main) roots.push(main);
+    const tempHits = [];
+    const pressHits = [];
+    const seen = new Set();
+    for (const root of roots) {
+      const list = [...root.querySelectorAll('input,textarea')];
+      if (root === (section || roots[0])) debug.inputsScanned = list.length;
+      for (const el of list) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        if (ourUi(el)) { debug.excludedUi++; continue; }
+        const typ = (el.type || '').toLowerCase();
+        if (SKIP_INPUT_TYPES.test(typ)) { debug.hiddenType++; continue; }
+        const map = attrMap(el);
+        if (map['aria-label']) debug.attrAria++;
+        if (map.placeholder) debug.attrPlaceholder++;
+        if (map.title) debug.attrTitle++;
+        if (map.name) debug.attrName++;
+        if (map.id) debug.attrId++;
+        if (map.formcontrolname || map.formControlName || map['ng-reflect-name'] || map['ng-reflect-form-control-name']) debug.attrFormcontrol++;
+        if (el.disabled || el.readOnly) { debug.readonlyOrDisabled++; }
+        const cls = classifyInput(el);
+        if (cls.kind === 'ptp') { debug.excludedPtp++; continue; }
+        if (cls.via === 'attr' && cls.kind === 'temperature') debug.tempAttrHits++;
+        if (cls.via === 'attr' && cls.kind === 'pressure') debug.pressAttrHits++;
+        if (cls.via === 'near' && cls.kind === 'temperature') debug.tempNearHits++;
+        if (cls.via === 'near' && cls.kind === 'pressure') debug.pressNearHits++;
+        if (cls.nearby && cls.nearby.units.some(u => UNIT_C_RE.test(u))) debug.unitCNear++;
+        if (cls.nearby && cls.nearby.units.some(u => UNIT_PRESS_RE.test(u))) debug.unitKpaNear++;
+        if (!isEditableInput(el)) continue;
+        if (!isShown(el)) continue;
+        debug.editable++;
+        const inSection = !!(section && section.contains(el));
+        const rec = { el, inSection, via: cls.via, units: (cls.nearby && cls.nearby.units) || [] };
+        if (cls.kind === 'temperature') tempHits.push(rec);
+        if (cls.kind === 'pressure') pressHits.push(rec);
+      }
+    }
+    const pick = hits => {
+      const preferred = hits.filter(h => h.inSection);
+      const pool = preferred.length ? preferred : hits;
+      pool.sort((a, b) => {
+        const ua = a.units.length ? 1 : 0, ub = b.units.length ? 1 : 0;
+        if (ua !== ub) return ub - ua;
+        if ((a.via === 'attr') !== (b.via === 'attr')) return a.via === 'attr' ? -1 : 1;
+        return 0;
+      });
+      return pool[0] ? pool[0].el : null;
+    };
+    return { temperature: pick(tempHits), pressure: pick(pressHits), section, debug };
+  }
+  function logInputDebug(target, debug) {
+    log('debug input scan', targetName(target),
+      'scanned=' + debug.inputsScanned,
+      'editable=' + debug.editable,
+      'readonlyOrDisabled=' + debug.readonlyOrDisabled,
+      'excludedUi=' + debug.excludedUi,
+      'excludedPtp=' + debug.excludedPtp,
+      'hiddenType=' + debug.hiddenType,
+      'attrs(aria/placeholder/title/name/id/formcontrol)=' +
+        [debug.attrAria, debug.attrPlaceholder, debug.attrTitle, debug.attrName, debug.attrId, debug.attrFormcontrol].join('/'),
+      'tempAttr=' + debug.tempAttrHits,
+      'pressAttr=' + debug.pressAttrHits,
+      'tempNear=' + debug.tempNearHits,
+      'pressNear=' + debug.pressNearHits,
+      'unitC=' + debug.unitCNear,
+      'unitKpa=' + debug.unitKpaNear,
+      'sectionFound=' + debug.sectionFound,
+      'headerMatchedEnergy=' + debug.headerMatchedEnergy
+    );
   }
 
   async function waitFor(pred, timeout, interval) {
@@ -286,9 +600,7 @@
     el.style.color = kind === 'error' ? '#b71c1c' : kind === 'ok' ? '#1b5e20' : '#111';
   }
 
-  async function fillOneInput(kind, value, labelFn) {
-    const inp = findLabeledInput(labelFn);
-    if (!inp) return kind + ' input not found';
+  async function setIfNeeded(kind, inp, value) {
     if (valuesEqual(inp.value, value)) { log(kind, 'already set'); return null; }
     inp.focus();
     setVal(inp, value);
@@ -299,21 +611,52 @@
     await sleep(350);
     if (valuesEqual(inp.value, value)) { log(kind, 'set after retry'); return null; }
     log(kind, 'did not stick');
-    return kind + ' did not stick';
+    return kind.toLowerCase() + ' did not stick';
+  }
+
+  async function revealAndFindInputs(target) {
+    const t0 = Date.now();
+    let last = findTempAndPressure(target);
+    let didScroll = false;
+    while (Date.now() - t0 < INPUT_WAIT_MS) {
+      if (aborted) break;
+      const section = last.section || findEnergySection(target);
+      if (section) {
+        scrollEl(section);
+        didScroll = true;
+      } else if (!didScroll) {
+        scrollEl(mainRoot());
+        didScroll = true;
+      } else {
+        scrollPaneDown(mainRoot());
+      }
+      await sleep(250);
+      last = findTempAndPressure(target);
+      if (last.temperature && last.pressure) break;
+    }
+    logInputDebug(target, last.debug);
+    return last;
   }
 
   async function goToTarget(target) {
-    const groupEl = findGroupItem(target.group);
-    if (!groupEl) return 'group not found';
-    if (!safeClick(groupEl, target.group)) return 'group click refused';
-    await sleep(500);
-    const energyEl = await waitFor(() => findEnergyTab(target.energy), 8000);
-    if (!energyEl) return 'energy tab not found';
-    if (!safeClick(energyEl, target.energy)) return 'energy click refused';
-    await sleep(500);
-    const env = await waitFor(() => findLabeledInput(temperatureLabelMatches) || findLabeledInput(pressureLabelMatches) || section('Environmentals'), 8000);
-    if (!env) return 'Environmentals not found';
-    return null;
+    let energyEl = findEnergyTreeRow(target.energy, target.group);
+    let via = 'tree';
+    if (!energyEl) {
+      const groupEl = findGroupItem(target.group);
+      if (!groupEl) return { error: 'group not found' };
+      if (!safeClick(groupEl, target.group)) return { error: 'group click refused' };
+      await sleep(400);
+      energyEl = await waitFor(() => findEnergyTreeRow(target.energy, target.group), 3000);
+    }
+    if (!energyEl) {
+      energyEl = await waitFor(() => findEnergyTab(target.energy), 4000);
+      via = 'tab';
+    }
+    if (!energyEl) return { error: 'energy row not found' };
+    if (!safeClick(energyEl, via + ' ' + target.energy)) return { error: 'energy click refused' };
+    await sleep(400);
+    const found = await revealAndFindInputs(target);
+    return { found, via };
   }
 
   async function runFill(temperature, pressure) {
@@ -339,12 +682,23 @@
       const name = targetName(target);
       setStatus('Filling ' + (i + 1) + ' of 10: ' + name + '…');
       log('filling', (i + 1) + '/10');
-      const navErr = await goToTarget(target);
-      if (navErr) { failed.push(name + ' (' + navErr + ')'); log('fail'); continue; }
-      const tErr = await fillOneInput('Temperature', t, temperatureLabelMatches);
-      const pErr = await fillOneInput('Pressure', p, pressureLabelMatches);
-      if (!tErr && !pErr) { ok++; log('ok'); }
-      else failed.push(name + ' (' + [tErr, pErr].filter(Boolean).join(', ') + ')');
+      const nav = await goToTarget(target);
+      if (nav.error) { failed.push(name + ' (' + nav.error + ')'); log('fail'); continue; }
+      const found = nav.found;
+      const errs = [];
+      const scanned = found && found.debug ? found.debug.inputsScanned : 0;
+      if (!found || !found.temperature) errs.push('no temperature input (' + scanned + ' inputs scanned)');
+      else {
+        const e = await setIfNeeded('Temperature', found.temperature, t);
+        if (e) errs.push(e);
+      }
+      if (!found || !found.pressure) errs.push('no pressure input (' + scanned + ' inputs scanned)');
+      else {
+        const e = await setIfNeeded('Pressure', found.pressure, p);
+        if (e) errs.push(e);
+      }
+      if (!errs.length) { ok++; log('ok'); }
+      else { failed.push(name + ' (' + errs.join(', ') + ')'); log('fail'); }
       await sleep(250);
     }
     filling = false;
@@ -358,10 +712,10 @@
     if (!parsed) return false;
     const panel = document.getElementById(PANEL_ID);
     if (!panel) return false;
-    const t = panel.querySelector('.sc-tp-temp');
-    const p = panel.querySelector('.sc-tp-press');
-    if (t) t.value = parsed.temperature;
-    if (p) p.value = parsed.pressure;
+    const tIn = panel.querySelector('.sc-tp-temp');
+    const pIn = panel.querySelector('.sc-tp-press');
+    if (tIn) tIn.value = parsed.temperature;
+    if (pIn) pIn.value = parsed.pressure;
     log('parsed paste');
     return true;
   }
@@ -446,6 +800,16 @@
   function onPossibleChange() {
     if (gateDebounce) clearTimeout(gateDebounce);
     gateDebounce = setTimeout(evaluateGate, 200);
+  }
+
+  if (typeof globalThis !== 'undefined' && globalThis.TP_FILL_TEST) {
+    globalThis.TP_FILL_API = {
+      findTempAndPressure, findEnergySection, findEnergyTreeRow, findEnergyTab,
+      findGroupItem, classifyInput, kindFromAttrs, kindFromNearby, collectNearby,
+      isEditableInput, isPtpInput, energyLabelMatches, isGroupLabel, targetName,
+      SCRIPT_VERSION, TARGETS, PANEL_ID, BTN_ID
+    };
+    return;
   }
 
   log('waiting for Peace on page');
