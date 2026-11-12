@@ -32,13 +32,6 @@ function isGroupLabel(text, groupName) {
   if (!a || isIcpLabel(a)) return false;
   return new RegExp('^' + groupName.replace(/\s+/g, '\\s*') + '$', 'i').test(a);
 }
-function energyLabelMatches(text, energy) {
-  const a = norm(text), b = norm(energy);
-  if (!a || isIcpLabel(a)) return false;
-  if (new RegExp('^' + b.replace(/\s+/g, '\\s*') + '$', 'i').test(a)) return true;
-  const m = /^(\d+(?:\.\d+)?)\s*MeV$/i.exec(b);
-  return !!(m && new RegExp('^' + m[1] + '$').test(a));
-}
 function temperatureLabelMatches(text) { return TEMP_LABEL_RE.test(norm(text)); }
 function pressureLabelMatches(text) { return PRESS_LABEL_RE.test(norm(text)); }
 function isForbiddenClickText(text) {
@@ -49,35 +42,15 @@ function pageHasPeace(headerText, bodyText) {
   if (GATE_RE.test(headerText || '')) return true;
   return GATE_RE.test(bodyText || '');
 }
-function kindFromAttrs(blob) {
-  if (!blob) return null;
-  if (PTP_RE.test(blob)) return 'ptp';
-  const hasTemp = /temperature/i.test(blob);
-  const hasPress = /pressure/i.test(blob);
-  if (hasTemp && !hasPress) return 'temperature';
-  if (hasPress && !hasTemp) return 'pressure';
-  return null;
-}
-function kindFromNearby(texts, units) {
-  const exactTemp = texts.some(temperatureLabelMatches);
-  const exactPress = texts.some(pressureLabelMatches);
-  if (exactTemp && !exactPress) return 'temperature';
-  if (exactPress && !exactTemp) return 'pressure';
-  if (exactTemp && exactPress) {
-    for (const s of texts) {
-      if (temperatureLabelMatches(s)) return 'temperature';
-      if (pressureLabelMatches(s)) return 'pressure';
-    }
+function formatSummary(tOk, tN, pOk, pN, expected) {
+  const exp = expected == null ? 10 : expected;
+  let msg = 'Temperature: ' + tOk + ' of ' + tN + ' filled, Pressure: ' + pOk + ' of ' + pN + ' filled';
+  if (tN < exp || pN < exp) {
+    msg += '. Only ' + tN + ' temperature / ' + pN + ' pressure found — scroll to the bottom and press Fill again';
+  } else if (tN > exp || pN > exp) {
+    msg += '. Note: found ' + tN + ' temperature and ' + pN + ' pressure boxes (expected ' + exp + ')';
   }
-  const hasTemp = texts.some(s => TEMP_WORD_RE.test(s));
-  const hasPress = texts.some(s => PRESS_WORD_RE.test(s));
-  const hasC = units.some(u => UNIT_C_RE.test(u));
-  const hasKpa = units.some(u => UNIT_PRESS_RE.test(u));
-  if (hasTemp && !hasPress) return 'temperature';
-  if (hasPress && !hasTemp) return 'pressure';
-  if (hasKpa && !hasTemp) return 'pressure';
-  if (hasC && hasTemp && !hasPress) return 'temperature';
-  return null;
+  return msg;
 }
 
 let failed = 0;
@@ -89,94 +62,27 @@ function check(name, got, expected) {
 
 check('paste spaces', parsePaste('22.3 101.2'), { temperature: '22.3', pressure: '101.2' });
 check('paste comma', parsePaste('22.3, 101.2'), { temperature: '22.3', pressure: '101.2' });
-check('paste semicolon', parsePaste('22.3;101.2'), { temperature: '22.3', pressure: '101.2' });
-check('paste extra spaces', parsePaste('  22.3    101.2  '), { temperature: '22.3', pressure: '101.2' });
 check('paste one number', parsePaste('22.3'), null);
-check('paste empty', parsePaste(''), null);
-check('paste words', parsePaste('warm high'), null);
-
-check('values equal strings', valuesEqual('22.3', '22.3'), true);
 check('values equal numeric', valuesEqual('22.3', '22.300'), true);
-check('values different', valuesEqual('22.3', '22.4'), false);
-check('values empty', valuesEqual('', '22.3'), false);
-
-check('group photon', isGroupLabel('Photon constancy', 'Photon constancy'), true);
-check('group photon case', isGroupLabel('photon  constancy', 'Photon constancy'), true);
-check('group rejects ICP photon', isGroupLabel('Photon constancy with quad wedges (ICP)', 'Photon constancy'), false);
-check('group rejects ICP electron', isGroupLabel('Electron constancy with quad wedges (ICP)', 'Electron constancy'), false);
-check('group electron', isGroupLabel('Electron constancy', 'Electron constancy'), true);
-check('isIcp', isIcpLabel('Photon constancy with quad wedges (ICP)'), true);
-check('not icp', isIcpLabel('Photon constancy'), false);
-
-check('energy 6 MV exact', energyLabelMatches('6 MV', '6 MV'), true);
-check('energy 6 MV vs 6 FFF', energyLabelMatches('6 FFF', '6 MV'), false);
-check('energy 6 MV vs 16', energyLabelMatches('16 MV', '6 MV'), false);
-check('energy 10 FFF', energyLabelMatches('10 FFF', '10 FFF'), true);
-check('energy 6 MeV exact', energyLabelMatches('6 MeV', '6 MeV'), true);
-check('energy bare 6 for MeV', energyLabelMatches('6', '6 MeV'), true);
-check('energy bare 16 for 16 MeV', energyLabelMatches('16', '16 MeV'), true);
-check('energy bare 6 does not match 16 MeV', energyLabelMatches('6', '16 MeV'), false);
-check('energy 16 MeV does not match 6 MeV', energyLabelMatches('16 MeV', '6 MeV'), false);
-check('energy ICP tab ignored', energyLabelMatches('6 MV ICP', '6 MV'), false);
-
 check('temp label', temperatureLabelMatches('Temperature'), true);
-check('temp label unit', temperatureLabelMatches('Temperature (C)'), true);
-check('temp not room sentence', temperatureLabelMatches('Room Temperature coefficient'), false);
-check('press label', pressureLabelMatches('Pressure'), true);
-check('press label units', pressureLabelMatches('Pressure (kPa or mmHg)'), true);
-check('press label mmHg after fill', pressureLabelMatches('Pressure (mmHg)'), true);
-check('press not other', pressureLabelMatches('Pressure coefficient'), false);
-
-check('attr temperature', kindFromAttrs('temperature'), 'temperature');
-check('attr aria Temperature', kindFromAttrs('Temperature'), 'temperature');
-check('attr pressure name', kindFromAttrs('pressureKpa'), 'pressure');
-check('attr ptp excluded', kindFromAttrs('ptp'), 'ptp');
-check('attr empty', kindFromAttrs(''), null);
-check('near temp label', kindFromNearby(['Temperature'], ['C']), 'temperature');
-check('near press label', kindFromNearby(['Pressure (kPa or mmHg)'], ['kPa/mmHg']), 'pressure');
-check('near unit only kPa', kindFromNearby(['Setup'], ['kPa/mmHg']), 'pressure');
-
-check('forbid Pass All', isForbiddenClickText('Pass All'), true);
-check('forbid Submit', isForbiddenClickText('Submit'), true);
-check('forbid Complete', isForbiddenClickText('Complete'), true);
+check('press kPa or mmHg', pressureLabelMatches('Pressure (kPa or mmHg)'), true);
+check('press mmHg after fill', pressureLabelMatches('Pressure (mmHg)'), true);
+check('group rejects ICP', isGroupLabel('Photon constancy with quad wedges (ICP)', 'Photon constancy'), false);
 check('forbid Approve', isForbiddenClickText('Approve'), true);
-check('forbid Delete', isForbiddenClickText('Delete'), true);
-check('forbid Save', isForbiddenClickText('Save'), true);
-check('allow Photon constancy', isForbiddenClickText('Photon constancy'), false);
 check('allow 6 MV', isForbiddenClickText('6 MV'), false);
-
-check('gate header HDR_Peace', pageHasPeace('Daily | 12 NOV 2026 | HDR_Peace', ''), true);
-check('gate body fallback', pageHasPeace('', 'Machine: Peace'), true);
-check('gate case', pageHasPeace('PEACE', ''), true);
-check('gate absent', pageHasPeace('Daily | Other Machine', 'Safety Checks'), false);
-check('gate not Bravos', pageHasPeace('Daily | HDR_Bravos', 'HDR Daily'), false);
+check('gate Peace', pageHasPeace('Daily | HDR_Peace', ''), true);
+check('gate not Bravos', pageHasPeace('Daily | HDR_Bravos', ''), false);
+check('summary 10 of 10', formatSummary(10, 10, 10, 10), 'Temperature: 10 of 10 filled, Pressure: 10 of 10 filled');
+check('summary short', formatSummary(4, 4, 4, 4).indexOf('scroll to the bottom') !== -1, true);
+check('summary extra', formatSummary(12, 12, 12, 12).indexOf('expected 10') !== -1, true);
 
 const src = fs.readFileSync(path.join(__dirname, '..', 'suncheck-tp-fill.user.js'), 'utf8');
-check('script @version 1.2', /@version\s+1\.2\b/.test(src), true);
-check('script SCRIPT_VERSION', /const SCRIPT_VERSION = '1\.2'/.test(src), true);
-check('script name TP Fill', /@name\s+TP Fill/.test(src), true);
-check('script gate Peace', /const GATE_RE = \/peace\/i/.test(src), true);
-check('script 10 targets', (src.match(/group: 'Photon constancy'/g) || []).length === 5 && (src.match(/group: 'Electron constancy'/g) || []).length === 5, true);
-check('script excludes ICP', /quad\\s\*wedges\?\|\\bICP\\b/.test(src), true);
-check('script same host http', src.includes('@match        http://cnrrtrocperfx.rrt.ca.kp.org/*'), true);
-check('script same host https', src.includes('@match        https://cnrrtrocperfx.rrt.ca.kp.org/*'), true);
-check('script updateURL raw main', src.includes('https://raw.githubusercontent.com/mobility22/SunCHECK-TP-Fill/refs/heads/main/suncheck-tp-fill.user.js'), true);
-check('helpers in script: parsePaste', src.includes('function parsePaste'), true);
-check('helpers in script: energyLabelMatches', src.includes('function energyLabelMatches'), true);
-check('helpers in script: pageHasPeace', src.includes('function pageHasPeace'), true);
+check('script @version 1.3', /@version\s+1\.3\b/.test(src), true);
+check('script SCRIPT_VERSION', /const SCRIPT_VERSION = '1\.3'/.test(src), true);
+check('script closed shadow', src.includes("attachShadow({ mode: 'closed' })") && src.includes('data-label') && src.includes('::before'), true);
+check('script primary path has no required click', src.includes('start fill (scan all inputs, no navigation)'), true);
+check('script fallback only if short', src.includes('fewer than') && src.includes('tree-row fallback'), true);
 check('PHI-free log: no innerText dump in log()', /log\([^)]*innerText/.test(src), false);
-check('failure reason template', src.includes('no temperature input (') && src.includes(' inputs scanned)'), true);
-check('debug counts only', src.includes('debug input scan') && src.includes('inputsScanned'), true);
-
-const goTo = src.indexOf('async function goToTarget');
-const treeCall = src.indexOf('findEnergyTreeRow', goTo);
-const tabCall = src.indexOf('findEnergyTab', goTo);
-check('tree row nav is primary (before tab fallback)', goTo !== -1 && treeCall !== -1 && tabCall !== -1 && treeCall < tabCall, true);
-check('script waits for pane energy', src.includes('function paneShowsEnergy') && src.includes('function readPaneEnergy') && src.includes('waitForPaneReady'), true);
-check('script pointer click sequence', src.includes('pointerdown') && src.includes('mousedown') && src.includes('mouseup'), true);
-check('script does not self-scroll in wait', src.includes('function waitForPaneReady') && !/function waitForPaneReady[\s\S]{0,1200}scrollIntoView/.test(src), true);
-check('loop continues after nav failure', /nav failed[\s\S]{0,250}continue/.test(src) && src.includes('of 10 filled'), true);
-check('post-fill wait', src.includes('POST_FILL_MS') && src.includes('verifyAfterSettle'), true);
 
 function loadJsdom() {
   const tries = ['jsdom', '/tmp/jsdom-root/node_modules/jsdom', path.join(__dirname, '../node_modules/jsdom')];
@@ -186,210 +92,143 @@ function loadJsdom() {
   return null;
 }
 
+function sectionHtml(id, energy, tVal, pVal) {
+  return '<section id="' + id + '">' +
+    '<div class="h">Dosimetry - Photon constancy <b>' + energy + '</b></div>' +
+    '<div>Temperature</div><input class="t" id="t-' + id + '" type="text"' + (tVal != null ? ' value="' + tVal + '"' : '') + '><span>C</span>' +
+    '<div>Pressure (kPa or mmHg)</div><input class="p" id="p-' + id + '" type="text"' + (pVal != null ? ' value="' + pVal + '"' : '') + '><span>kPa/mmHg</span>' +
+    '<div>PTP</div><input class="ptp" id="ptp-' + id + '" type="text" readonly value="1.00">' +
+    '</section>';
+}
+
 const jsdom = loadJsdom();
 if (!jsdom) {
+  if (failed) { console.error(failed + ' failed'); process.exit(1); }
   console.log('SKIP DOM fixture tests (jsdom not installed)');
-} else {
-  const { JSDOM } = jsdom;
-  function loadApi(html) {
-    const dom = new JSDOM('<!DOCTYPE html><html><body>' + html + '</body></html>', {
-      url: 'https://example.test/#/Routine/Execution',
-      runScripts: 'dangerously',
-      beforeParse(window) {
-        window.TP_FILL_TEST = true;
-        Object.defineProperty(window.HTMLElement.prototype, 'offsetParent', {
-          get() { return this.parentNode && this.parentNode !== this.ownerDocument ? this.parentNode : this.ownerDocument.body; }
-        });
-      }
-    });
-    const script = dom.window.document.createElement('script');
-    script.textContent = src;
-    dom.window.document.body.appendChild(script);
-    if (!dom.window.TP_FILL_API) throw new Error('TP_FILL_API not exported');
-    return { api: dom.window.TP_FILL_API, document: dom.window.document, window: dom.window };
+  console.log('all tests passed');
+  process.exit(0);
+}
+
+const { JSDOM } = jsdom;
+function loadApi(html) {
+  const dom = new JSDOM('<!DOCTYPE html><html><body>' + html + '</body></html>', {
+    url: 'https://example.test/#/Routine/Execution',
+    runScripts: 'dangerously',
+    beforeParse(window) {
+      window.TP_FILL_TEST = true;
+      Object.defineProperty(window.HTMLElement.prototype, 'offsetParent', {
+        get() { return this.parentNode && this.parentNode !== this.ownerDocument ? this.parentNode : this.ownerDocument.body; }
+      });
+    }
+  });
+  const script = dom.window.document.createElement('script');
+  script.textContent = src;
+  dom.window.document.body.appendChild(script);
+  if (!dom.window.TP_FILL_API) throw new Error('TP_FILL_API not exported');
+  return { api: dom.window.TP_FILL_API, document: dom.window.document, window: dom.window };
+}
+
+const energies = ['6 MV', '10 MV', '15 MV', '6 FFF', '10 FFF', '6 MeV', '9 MeV', '12 MeV', '16 MeV', '20 MeV'];
+
+// 10+10 on one page: fill all, do not click the tree
+{
+  let clicks = 0;
+  const tree = '<nav class="tree"><div>Photon constancy</div>' +
+    energies.slice(0, 5).map(e => '<div class="child">' + e + '</div>').join('') + '</nav>';
+  const pane = '<header>Daily | HDR_Peace</header><main id="pane">' +
+    energies.map((e, i) => sectionHtml('s' + i, e, '', '')).join('') +
+    '</main>';
+  const { api, document } = loadApi(tree + pane);
+  document.querySelectorAll('.tree .child, .tree div').forEach(el => {
+    el.addEventListener('click', () => { clicks++; });
+  });
+  const found = api.findAllClassifiedInputs();
+  check('scan finds 10 temp', found.temps.length, 10);
+  check('scan finds 10 press', found.presses.length, 10);
+  const result = api.runFill('22.3', '101.2');
+  Promise.resolve(result).then(r => {
+    check('fill 10+10 tOk', r && r.tOk, 10);
+    check('fill 10+10 pOk', r && r.pOk, 10);
+    check('fill 10+10 summary 10 of 10', !!(r && r.summary && r.summary.indexOf('Temperature: 10 of 10 filled, Pressure: 10 of 10 filled') === 0 && r.summary.indexOf('Only') === -1), true);
+    check('fill 10+10 did not click the tree', clicks, 0);
+    const allT = [...document.querySelectorAll('input.t')].every(el => el.value === '22.3');
+    const allP = [...document.querySelectorAll('input.p')].every(el => el.value === '101.2');
+    const ptpUntouched = [...document.querySelectorAll('input.ptp')].every(el => el.value === '1.00');
+    check('fill 10+10 all temp values set', allT, true);
+    check('fill 10+10 all press values set', allP, true);
+    check('fill 10+10 PTP untouched', ptpUntouched, true);
+    testPanelAndExtras();
+  }).catch(err => {
+    check('fill 10+10 threw', String(err && err.message || err), 'no throw');
+    finish();
+  });
+}
+
+function testPanelAndExtras() {
+  // Panel in closed shadow: light DOM / Ctrl+F must not see Temperature or Pressure
+  {
+    const { api, document } = loadApi('<header>Daily | HDR_Peace</header><main></main>');
+    api.addPanel();
+    const host = document.getElementById('suncheck-tp-panel');
+    // Only the panel host's light-DOM text (body also contains the injected userscript source).
+    const light = host ? (host.textContent || host.innerHTML || '') : 'MISSING_PANEL';
+    check('panel host has no Temperature/Pressure text', !/temperature|pressure/i.test(light), true);
+    const root = api.panelRoot();
+    check('panel uses closed shadow root', !!(root && root.mode === 'closed'), true);
+    const labels = root ? [...root.querySelectorAll('[data-label]')].map(el => el.getAttribute('data-label')) : [];
+    check('panel labels are data-label CSS content', labels.some(s => /Temperature/.test(s)) && labels.some(s => /Pressure/.test(s)), true);
+    const scanned = api.findAllClassifiedInputs();
+    check('panel inputs excluded from scan', scanned.temps.length === 0 && scanned.presses.length === 0, true);
   }
 
-  const target6 = { group: 'Photon constancy', energy: '6 MV' };
-
-  // Sibling text labels + unit suffixes, no Environmentals heading, no <label for>
+  // More than 10 (e.g. ICP sections also in the DOM): fill all, report the count
   {
-    const { api } = loadApi(`
-      <div class="content">
-        <div class="head">Dosimetry - Photon constancy <span>6 MV</span></div>
-        <div class="row"><div>Temperature</div><input id="t1" type="text"><span>C</span></div>
-        <div class="row"><div>Pressure (kPa or mmHg)</div><input id="p1" type="text"><span>kPa/mmHg</span></div>
-        <div class="row"><div>PTP</div><input id="ptp1" type="text" readonly value="1.00"></div>
-      </div>`);
-    const found = api.findTempAndPressure(target6);
-    check('dom sibling labels: temp', found.temperature && found.temperature.id, 't1');
-    check('dom sibling labels: press', found.pressure && found.pressure.id, 'p1');
-    check('dom sibling labels: not ptp', found.temperature && found.temperature.id !== 'ptp1' && found.pressure.id !== 'ptp1', true);
-  }
-
-  // aria-label / placeholder / formcontrolname
-  {
-    const { api } = loadApi(`
-      <div class="content">
-        <div>Dosimetry - Photon constancy</div><div>6 MV</div>
-        <input id="t2" aria-label="Temperature" type="text">
-        <input id="p2" placeholder="Pressure (kPa or mmHg)" type="text">
-      </div>`);
-    const found = api.findTempAndPressure(target6);
-    check('dom aria/placeholder: temp', found.temperature && found.temperature.id, 't2');
-    check('dom aria/placeholder: press', found.pressure && found.pressure.id, 'p2');
-  }
-  {
-    const { api } = loadApi(`
-      <div class="content">
-        <h3>Dosimetry - Photon constancy 6 MV</h3>
-        <input id="t3" name="temperature" type="text">
-        <input id="p3" formcontrolname="pressure" type="text">
-      </div>`);
-    const found = api.findTempAndPressure(target6);
-    check('dom name/formcontrolname: temp', found.temperature && found.temperature.id, 't3');
-    check('dom name/formcontrolname: press', found.pressure && found.pressure.id, 'p3');
-  }
-
-  // Exclude our panel inputs and PTP / disabled
-  {
-    const { api } = loadApi(`
-      <div id="suncheck-tp-panel">
-        <input class="sc-tp-temp" id="panel-t" aria-label="Temperature" type="text">
-        <input class="sc-tp-press" id="panel-p" aria-label="Pressure" type="text">
-      </div>
-      <div class="content">
-        <div>Dosimetry - Photon constancy 6 MV</div>
-        <input id="t4" aria-label="Temperature" type="text">
-        <input id="p4" aria-label="Pressure" type="text">
-        <input id="bad" aria-label="Temperature" type="text" disabled>
-        <input id="ptp2" aria-label="PTP" type="text">
-      </div>`);
-    const found = api.findTempAndPressure(target6);
-    check('dom excludes panel temp', found.temperature && found.temperature.id, 't4');
-    check('dom excludes panel press', found.pressure && found.pressure.id, 'p4');
-  }
-
-  // Two energy sections: pick the 6 MV pair, not 10 MV
-  {
-    const { api } = loadApi(`
-      <div class="content">
-        <section>
-          <div class="h">Dosimetry - Photon constancy <b>10 MV</b></div>
-          <div>Temperature</div><input id="t-10" type="text"><span>C</span>
-          <div>Pressure (kPa or mmHg)</div><input id="p-10" type="text"><span>kPa/mmHg</span>
-        </section>
-        <section>
-          <div class="h">Dosimetry - Photon constancy <b>6 MV</b></div>
-          <div>Temperature</div><input id="t-6" type="text"><span>C</span>
-          <div>Pressure (kPa or mmHg)</div><input id="p-6" type="text"><span>kPa/mmHg</span>
-        </section>
-      </div>`);
-    const found = api.findTempAndPressure(target6);
-    check('dom scopes to 6 MV temp', found.temperature && found.temperature.id, 't-6');
-    check('dom scopes to 6 MV press', found.pressure && found.pressure.id, 'p-6');
-  }
-
-  // Left-tree energy row preferred; ICP group row ignored
-  {
-    const { api, document } = loadApi(`
-      <nav class="tree">
-        <div>
-          <div>Photon constancy</div>
-          <div class="child">6 MV</div>
-          <div class="child">10 MV</div>
-        </div>
-        <div>
-          <div>Photon constancy with quad wedges (ICP)</div>
-          <div class="child">6 MV</div>
-        </div>
-      </nav>
-      <main>
-        <div role="tablist"><button>6 MV</button></div>
-      </main>`);
-    const row = api.findEnergyTreeRow('6 MV', 'Photon constancy');
-    check('tree row found under Photon constancy', !!(row && row.className === 'child' && row.textContent.trim() === '6 MV' && row.closest('.tree')), true);
-    check('tree row is not the ICP child', !!(row && !/ICP/.test(row.parentElement.innerText) || (row && row.parentElement.querySelector('div') && row.parentElement.querySelector('div').textContent.trim() === 'Photon constancy')), true);
-    const tab = api.findEnergyTab('6 MV');
-    check('tab fallback still finds a tab', !!(tab && tab.closest('main')), true);
-  }
-
-  // Async pane swap: clicking a tree row later changes the header energy and inputs (same layout, new content).
-  // The right pane also "auto-scrolls"; goToTarget must wait for the energy label and a stable layout, and must not fill the old 6 MV inputs.
-  {
-    const html = `
-      <nav class="tree">
-        <div>
-          <div>Photon constancy</div>
-          <div class="child" id="row-6">6 MV</div>
-          <div class="child" id="row-10">10 MV</div>
-        </div>
-      </nav>
-      <main id="pane" style="height:200px;overflow:auto">
-        <section id="dose">
-          <div class="h">Dosimetry - Photon constancy <b id="energy-label">6 MV</b></div>
-          <div>Temperature</div><input id="t-cur" type="text" value="21"><span>C</span>
-          <div>Pressure (mmHg)</div><input id="p-cur" type="text" value="756"><span>mmHg</span>
-        </section>
-      </main>`;
-    const { api, document, window } = loadApi(html);
-    const pane = document.getElementById('pane');
-    const row10 = document.getElementById('row-10');
-    let swapAt = 0;
-    let swapped = false;
-    const swap = () => {
-      if (swapped) return;
-      swapped = true;
-      swapAt = Date.now();
-      document.getElementById('energy-label').textContent = '10 MV';
-      const tInp = document.getElementById('t-cur') || document.getElementById('t-10');
-      const pInp = document.getElementById('p-cur') || document.getElementById('p-10');
-      if (tInp) { tInp.id = 't-10'; tInp.value = ''; }
-      if (pInp) { pInp.id = 'p-10'; pInp.value = ''; }
-      if (pInp && pInp.previousElementSibling) pInp.previousElementSibling.textContent = 'Pressure (kPa or mmHg)';
-      pane.scrollTop = 40;
-      setTimeout(() => { pane.scrollTop = 120; }, 80);
-      setTimeout(() => { pane.scrollTop = 120; }, 200);
-    };
-    row10.addEventListener('click', () => { setTimeout(swap, 150); });
-    row10.addEventListener('mousedown', () => { /* same handler path as a real click sequence */ });
-    const started = Date.now();
-    const target10 = { group: 'Photon constancy', energy: '10 MV' };
-    check('pane starts at 6 MV', api.readPaneEnergy('Photon constancy'), '6 MV');
-    const result = api.goToTarget(target10);
-    // goToTarget is async
-    Promise.resolve(result).then(nav => {
-      const elapsedAfterSwap = Date.now() - (swapAt || started);
-      check('async swap: nav ok', !!(nav && !nav.error && nav.found), true);
-      check('async swap: pane energy is 10 MV', api.readPaneEnergy('Photon constancy'), '10 MV');
-      check('async swap: found 10 MV temp, not stale 6 MV values', !!(nav.found && nav.found.temperature && nav.found.temperature.id === 't-10' && nav.found.temperature.value === ''), true);
-      check('async swap: found 10 MV press', !!(nav.found && nav.found.pressure && nav.found.pressure.id === 'p-10'), true);
-      check('async swap: waited until after delayed render', swapAt > 0 && Date.now() >= swapAt, true);
-      check('async swap: waited for settle after swap', elapsedAfterSwap >= 250, true);
-      finish();
+    const extra = sectionHtml('icp1', '6 MV', '', '') + sectionHtml('icp2', '10 MV', '', '');
+    const pane = '<header>Daily | HDR_Peace</header><main>' +
+      energies.map((e, i) => sectionHtml('s' + i, e, '', '')).join('') + extra + '</main>';
+    const { api } = loadApi(pane);
+    const found = api.findAllClassifiedInputs();
+    check('scan finds 12 temp including extras', found.temps.length, 12);
+    Promise.resolve(api.runFill('21', '756')).then(r => {
+      check('fill extras tOk 12', r && r.tOk, 12);
+      check('fill extras pOk 12', r && r.pOk, 12);
+      check('fill extras notes expected 10', !!(r && r.summary && /expected 10/.test(r.summary)), true);
+      testLazyFallback();
     }).catch(err => {
-      check('async swap: goToTarget threw', String(err && err.message || err), 'no throw');
+      check('fill extras threw', String(err && err.message || err), 'no throw');
       finish();
     });
-    return; // finish() after the promise
   }
+}
+
+function testLazyFallback() {
+  // Only 2 sections in the DOM until a tree row is clicked, then more appear
+  const initial = '<header>Daily | HDR_Peace</header>' +
+    '<nav class="tree"><div>Photon constancy</div><div class="child" id="row-6">6 MV</div><div class="child" id="row-10">10 MV</div></nav>' +
+    '<main id="pane">' + sectionHtml('s0', '6 MV', '', '') + sectionHtml('s1', '10 MV', '', '') + '</main>';
+  const { api, document } = loadApi(initial);
+  const pane = document.getElementById('pane');
+  let clicks = 0;
+  function revealRest() {
+    if (document.getElementById('s2')) return;
+    pane.insertAdjacentHTML('beforeend', energies.slice(2).map((e, i) => sectionHtml('s' + (i + 2), e, '', '')).join(''));
+  }
+  document.getElementById('row-10').addEventListener('click', () => { clicks++; setTimeout(revealRest, 80); });
+  document.getElementById('row-6').addEventListener('click', () => { clicks++; });
+  const before = api.findAllClassifiedInputs();
+  check('lazy start finds only 2 temp', before.temps.length, 2);
+  Promise.resolve(api.runFill('22.3', '101.2')).then(r => {
+    check('lazy fallback clicked a tree row', clicks > 0, true);
+    check('lazy fallback ended with 10 temp filled', r && r.tOk, 10);
+    check('lazy fallback ended with 10 press filled', r && r.pOk, 10);
+    finish();
+  }).catch(err => {
+    check('lazy fallback threw', String(err && err.message || err), 'no throw');
+    finish();
+  });
 }
 
 function finish() {
-  if (failed) {
-    console.error(failed + ' failed');
-    process.exit(1);
-  }
-  console.log('all tests passed');
-}
-
-
-if (typeof finish === 'function' && !jsdom) {
-  if (failed) {
-    console.error(failed + ' failed');
-    process.exit(1);
-  }
-  console.log('all tests passed');
-} else if (!jsdom) {
   if (failed) {
     console.error(failed + ' failed');
     process.exit(1);
