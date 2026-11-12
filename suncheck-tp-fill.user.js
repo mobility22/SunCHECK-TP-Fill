@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TP Fill
 // @namespace    https://github.com/mobility22/SunCHECK-TP-Fill
-// @version      1.1
+// @version      1.2
 // @description  Fill SunCHECK Peace temperature and pressure on Photon/Electron constancy (never Approve/Submit)
 // @match        http://cnrrtrocperfx.rrt.ca.kp.org/*
 // @match        https://cnrrtrocperfx.rrt.ca.kp.org/*
@@ -13,13 +13,15 @@
 (function () {
   'use strict';
   const TAG = '[TP Fill]';
-  const SCRIPT_VERSION = '1.1';
+  const SCRIPT_VERSION = '1.2';
   const log = (...a) => console.log(TAG, ...a);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   const GATE_RE = /peace/i;
   const GATE_TIMEOUT_MS = 30000;
-  const INPUT_WAIT_MS = 5000;
+  const NAV_WAIT_MS = 8000;
+  const STABLE_MS = 300;
+  const POST_FILL_MS = 800;
   const HEADER_SEL = 'header,[role="banner"],[class*="title" i],[class*="header" i],[class*="toolbar" i],[class*="navbar" i],[class*="appbar" i],[class*="app-bar" i],[class*="topbar" i],[class*="top-bar" i],h1,h2';
   const STORE_KEY = 'suncheck-tp-fill-v1';
   const BTN_ID = 'suncheck-tp-btn';
@@ -118,12 +120,8 @@
     input.dispatchEvent(new Event('change', { bubbles: true }));
     input.dispatchEvent(new Event('blur', { bubbles: true }));
   }
-  function safeClick(el, what) {
-    if (!el) { log('REFUSED to click: missing', what || ''); return false; }
-    if (el.closest && el.closest('#' + PANEL_ID + ',#' + BTN_ID)) return false;
-    const t = norm(el.innerText || el.value || el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title')) || '');
-    if (isForbiddenClickText(t)) { log('REFUSED to click', what || 'forbidden'); return false; }
-    el.click(); log('clicked', what || 'item'); return true;
+  function safeClick(el, what, energy) {
+    return safeActivate(el, what, energy);
   }
 
   function ourUi(el) {
@@ -142,6 +140,14 @@
   function isShown(el) {
     if (!el || ourUi(el) || el.hidden) return false;
     if (vis(el)) return true;
+    try {
+      const st = el.ownerDocument && el.ownerDocument.defaultView && el.ownerDocument.defaultView.getComputedStyle(el);
+      if (st && (st.display === 'none' || st.visibility === 'hidden')) return false;
+    } catch (e) { /* ignore */ }
+    return el.isConnected !== false;
+  }
+  function isPresentInDom(el) {
+    if (!el || ourUi(el) || el.hidden) return false;
     try {
       const st = el.ownerDocument && el.ownerDocument.defaultView && el.ownerDocument.defaultView.getComputedStyle(el);
       if (st && (st.display === 'none' || st.visibility === 'hidden')) return false;
@@ -196,7 +202,7 @@
   }
   function mainRoot() {
     const main = document.querySelector('main,[role="main"],[class*="content"],[class*="detail"],[class*="workspace"]');
-    if (main && isShown(main) && !ourUi(main)) return main;
+    if (main && isPresentInDom(main) && !ourUi(main)) return main;
     return document.body;
   }
   function isUnderIcp(el) {
@@ -216,7 +222,7 @@
     }
     return null;
   }
-  function findEnergyTreeRow(energy, groupName) {
+  function findEnergyTreeRows(energy, groupName) {
     const groupEl = findGroupItem(groupName);
     const hits = [];
     const seen = new Set();
@@ -239,7 +245,11 @@
         hits.push(el);
       }
     }
-    return pickShortest(hits);
+    if (hits.length) pickShortest(hits);
+    return hits;
+  }
+  function findEnergyTreeRow(energy, groupName) {
+    return findEnergyTreeRows(energy, groupName)[0] || null;
   }
   function findEnergyTab(energy) {
     const roots = [];
@@ -257,6 +267,92 @@
       }
     }
     return pickShortest(hits);
+  }
+  function findEnergyTabs(energy) {
+    const hits = [];
+    const seen = new Set();
+    const roots = [];
+    const tablists = [...document.querySelectorAll('[role="tablist"],[class*="tab"],[class*="Tab"]')].filter(el => isPresentInDom(el) && !ourUi(el) && !el.closest(TREE_SEL));
+    roots.push(...tablists);
+    roots.push(mainRoot());
+    for (const root of roots) {
+      for (const el of [...root.querySelectorAll('a,button,[role="tab"],[role="button"],li,span,div')].filter(e => isPresentInDom(e) && !ourUi(e))) {
+        if (seen.has(el)) continue;
+        seen.add(el);
+        if (el.closest(TREE_SEL)) continue;
+        if (energyLabelMatches(ownLabel(el), energy)) hits.push(el);
+      }
+    }
+    if (hits.length) pickShortest(hits);
+    return hits;
+  }
+
+  function dispatchPointerClick(el) {
+    const doc = el.ownerDocument || document;
+    const win = doc.defaultView || window;
+    let x = 0, y = 0;
+    try {
+      const r = el.getBoundingClientRect();
+      x = r.left + (r.width || 1) / 2;
+      y = r.top + (r.height || 1) / 2;
+    } catch (e) { /* ignore */ }
+    const base = { bubbles: true, cancelable: true, view: win, button: 0, buttons: 1, clientX: x, clientY: y, screenX: x, screenY: y, pointerId: 1, pointerType: 'mouse', isPrimary: true };
+    const fire = (type, kind) => {
+      try {
+        if (kind === 'pointer' && win.PointerEvent) el.dispatchEvent(new win.PointerEvent(type, base));
+        else if (kind === 'mouse' && (win.MouseEvent || win.Event)) el.dispatchEvent(new (win.MouseEvent || win.Event)(type, base));
+        else el.dispatchEvent(new win.Event(type, { bubbles: true, cancelable: true }));
+      } catch (err) {
+        try { el.dispatchEvent(new win.Event(type, { bubbles: true, cancelable: true })); } catch (e2) { /* ignore */ }
+      }
+    };
+    fire('pointerdown', 'pointer');
+    fire('mousedown', 'mouse');
+    fire('pointerup', 'pointer');
+    fire('mouseup', 'mouse');
+    fire('click', 'mouse');
+    try { if (typeof el.click === 'function') el.click(); } catch (e) { /* ignore */ }
+  }
+  function clickableChain(el, energy) {
+    const chain = [];
+    const add = n => { if (n && !ourUi(n) && !chain.includes(n)) chain.push(n); };
+    if (!el) return chain;
+    try {
+      for (const n of el.querySelectorAll('a,button,[role="treeitem"],[role="tab"],[role="button"]')) add(n);
+      for (const n of el.querySelectorAll('span,div,label,p,b,strong,i')) {
+        const lab = ownLabel(n) || norm(n.textContent || '').split('\n')[0];
+        if (energy && (energyLabelMatches(lab, energy) || energyLabelMatches(ownLabel(n), energy))) add(n);
+      }
+    } catch (e) { /* ignore */ }
+    add(el);
+    let p = el.parentElement;
+    for (let i = 0; i < 3 && p && p !== document.body; i++, p = p.parentElement) {
+      const role = (p.getAttribute && p.getAttribute('role')) || '';
+      const tag = p.tagName || '';
+      if (role === 'treeitem' || role === 'option' || role === 'tab' || tag === 'A' || tag === 'BUTTON' || tag === 'LI') add(p);
+    }
+    return chain;
+  }
+  function canActivate(el) {
+    if (!el || ourUi(el)) return false;
+    const t = norm(el.innerText || el.value || (el.getAttribute && (el.getAttribute('aria-label') || el.getAttribute('title'))) || '');
+    if (isForbiddenClickText(t)) return false;
+    return true;
+  }
+  function safeActivate(el, what, energy) {
+    const targets = clickableChain(el, energy);
+    if (!targets.length && el) targets.push(el);
+    for (const node of targets) {
+      if (!canActivate(node)) {
+        if (node && isForbiddenClickText(norm(node.innerText || ''))) log('REFUSED to click', what || 'forbidden');
+        continue;
+      }
+      dispatchPointerClick(node);
+      log('clicked', what || 'item');
+      return true;
+    }
+    log('REFUSED to click: missing', what || '');
+    return false;
   }
 
   function attrMap(el) {
@@ -423,7 +519,7 @@
   function findEnergySection(target) {
     const re = dosimetryRe(target.group);
     const nodes = [...document.querySelectorAll('h1,h2,h3,h4,h5,div,span,a,p,strong,b,legend')].filter(el => {
-      if (!isShown(el) || ourUi(el) || (el.closest && el.closest(TREE_SEL))) return false;
+      if (!isPresentInDom(el) || ourUi(el) || (el.closest && el.closest(TREE_SEL))) return false;
       const t = norm((el.innerText || el.textContent || '').split('\n')[0]);
       return t.length < 120 && re.test(t);
     });
@@ -446,15 +542,90 @@
     try { el.scrollIntoView({ block: 'center', inline: 'nearest' }); }
     catch (e) { try { el.scrollIntoView(); } catch (e2) { /* ignore */ } }
   }
-  function scrollPaneDown(pane) {
-    if (!pane) return;
-    try {
-      if (pane.scrollHeight && pane.scrollHeight > pane.clientHeight + 20) {
-        pane.scrollTop = Math.min(pane.scrollTop + Math.max(180, pane.clientHeight * 0.6), pane.scrollHeight);
-      } else if (pane.ownerDocument && pane.ownerDocument.defaultView) {
-        pane.ownerDocument.defaultView.scrollBy(0, 240);
+  function paneScrollTop() {
+    const pane = mainRoot();
+    if (!pane) return 0;
+    if (typeof pane.scrollTop === 'number' && pane.scrollHeight > pane.clientHeight + 4) return pane.scrollTop;
+    const win = pane.ownerDocument && pane.ownerDocument.defaultView;
+    if (win && win.scrollY != null) return win.scrollY;
+    return 0;
+  }
+  function photonEnergies() { return ['10 FFF', '6 FFF', '15 MV', '10 MV', '6 MV']; }
+  function electronEnergies() { return ['20 MeV', '16 MeV', '12 MeV', '9 MeV', '6 MeV']; }
+  function knownEnergies(groupName) {
+    return groupKind(groupName) === 'Photon' ? photonEnergies() : electronEnergies();
+  }
+  function extractEnergyFromText(text, groupName) {
+    const a = norm(text);
+    if (!a) return '';
+    for (const e of knownEnergies(groupName)) {
+      if (energyInText(a, e) || energyLabelMatches(a, e)) return e;
+    }
+    return '';
+  }
+  function readPaneEnergy(groupName) {
+    const re = dosimetryRe(groupName);
+    const headers = [...document.querySelectorAll('h1,h2,h3,h4,h5,div,span,a,p,strong,b,legend')].filter(el => {
+      if (!isPresentInDom(el) || ourUi(el) || (el.closest && el.closest(TREE_SEL))) return false;
+      const t = norm((el.innerText || el.textContent || '').split('\n')[0]);
+      return t.length < 120 && re.test(t);
+    });
+    for (const h of headers) {
+      const bits = [norm((h.innerText || h.textContent || '').split('\n').slice(0, 4).join(' '))];
+      const kids = h.parentElement ? [...h.parentElement.children] : [];
+      for (const sib of kids) {
+        const t = norm((sib.innerText || sib.textContent || '').split('\n')[0]);
+        if (t && t.length < 40) bits.push(t);
       }
-    } catch (e) { /* ignore */ }
+      try {
+        for (const child of h.querySelectorAll('span,div,b,strong,em,p')) {
+          const t = norm((child.innerText || child.textContent || '').split('\n')[0]);
+          if (t && t.length < 24) bits.push(t);
+        }
+      } catch (e) { /* ignore */ }
+      const found = extractEnergyFromText(bits.join(' | '), groupName);
+      if (found) return found;
+    }
+    const tablists = [...document.querySelectorAll('[role="tablist"],[class*="tab"],[aria-selected="true"]')].filter(el => isPresentInDom(el) && !ourUi(el) && !el.closest(TREE_SEL));
+    for (const root of tablists) {
+      const sel = root.matches && (root.getAttribute('aria-selected') === 'true' || /selected|active/i.test(root.className || '')) ? root
+        : (root.querySelector && root.querySelector('[aria-selected="true"],[class*="selected"],[class*="active"]'));
+      if (!sel) continue;
+      const found = extractEnergyFromText(ownLabel(sel) || sel.textContent, groupName);
+      if (found) return found;
+    }
+    return '';
+  }
+  function paneShowsEnergy(target) {
+    const e = readPaneEnergy(target.group);
+    return !!(e && energyLabelMatches(e, target.energy));
+  }
+  function inputSnapshot(target) {
+    const found = findTempAndPressure(target);
+    return {
+      energy: readPaneEnergy(target.group),
+      alreadyTarget: paneShowsEnergy(target),
+      temperature: found.temperature || null,
+      pressure: found.pressure || null,
+      found
+    };
+  }
+  function layoutSignature(target) {
+    const parts = [readPaneEnergy(target.group) || '', 's' + Math.round(paneScrollTop())];
+    const found = findTempAndPressure(target);
+    const els = [];
+    const section = found.section || findEnergySection(target);
+    if (section) els.push(section);
+    if (found.temperature) els.push(found.temperature);
+    if (found.pressure) els.push(found.pressure);
+    for (const el of els) {
+      try {
+        const r = el.getBoundingClientRect();
+        parts.push([Math.round(r.top), Math.round(r.left), Math.round(r.width), Math.round(r.height)].join(','));
+      } catch (e) { parts.push('x'); }
+    }
+    parts.push(found.temperature ? 't' : '-', found.pressure ? 'p' : '-');
+    return parts.join('|');
   }
 
   function emptyDebug() {
@@ -519,7 +690,7 @@
         if (cls.nearby && cls.nearby.units.some(u => UNIT_C_RE.test(u))) debug.unitCNear++;
         if (cls.nearby && cls.nearby.units.some(u => UNIT_PRESS_RE.test(u))) debug.unitKpaNear++;
         if (!isEditableInput(el)) continue;
-        if (!isShown(el)) continue;
+        if (!isPresentInDom(el)) continue;
         debug.editable++;
         const inSection = !!(section && section.contains(el));
         const rec = { el, inSection, via: cls.via, units: (cls.nearby && cls.nearby.units) || [] };
@@ -593,14 +764,30 @@
   let filling = false;
   let aborted = false;
 
+  const energyProgress = {};
+  function renderProgress() {
+    const box = document.getElementById('suncheck-tp-progress');
+    if (!box) return;
+    box.textContent = TARGETS.map(tg => {
+      const n = targetName(tg);
+      return n + ': ' + (energyProgress[n] || '…');
+    }).join('\n');
+  }
   function setStatus(text, kind) {
     const el = document.getElementById('suncheck-tp-status');
     if (!el) return;
     el.textContent = text;
     el.style.color = kind === 'error' ? '#b71c1c' : kind === 'ok' ? '#1b5e20' : '#111';
   }
+  function setEnergyProgress(name, state, kind) {
+    energyProgress[name] = state;
+    renderProgress();
+    setStatus(name + ': ' + state, kind);
+    log(name + ':', state);
+  }
 
   async function setIfNeeded(kind, inp, value) {
+    if (!inp) return kind.toLowerCase() + ' input not found';
     if (valuesEqual(inp.value, value)) { log(kind, 'already set'); return null; }
     inp.focus();
     setVal(inp, value);
@@ -613,50 +800,130 @@
     log(kind, 'did not stick');
     return kind.toLowerCase() + ' did not stick';
   }
+  async function verifyAfterSettle(target, tVal, pVal) {
+    await sleep(POST_FILL_MS);
+    if (!paneShowsEnergy(target)) return 'pane changed before values settled';
+    const again = findTempAndPressure(target);
+    const errs = [];
+    if (!again.temperature || !valuesEqual(again.temperature.value, tVal)) errs.push('temperature did not stick');
+    if (!again.pressure || !valuesEqual(again.pressure.value, pVal)) errs.push('pressure did not stick');
+    return errs;
+  }
 
-  async function revealAndFindInputs(target) {
+  async function waitForPaneReady(target, before, timeout) {
     const t0 = Date.now();
-    let last = findTempAndPressure(target);
-    let didScroll = false;
-    while (Date.now() - t0 < INPUT_WAIT_MS) {
+    const ms = timeout == null ? NAV_WAIT_MS : timeout;
+    let lastSig = null;
+    let stableSince = null;
+    let lastFound = (before && before.found) || findTempAndPressure(target);
+    while (Date.now() - t0 < ms) {
       if (aborted) break;
-      const section = last.section || findEnergySection(target);
-      if (section) {
-        scrollEl(section);
-        didScroll = true;
-      } else if (!didScroll) {
-        scrollEl(mainRoot());
-        didScroll = true;
+      const energyOk = paneShowsEnergy(target);
+      lastFound = findTempAndPressure(target);
+      const sig = layoutSignature(target);
+      if (energyOk && lastFound.temperature && lastFound.pressure) {
+        if (sig === lastSig) {
+          if (stableSince == null) stableSince = Date.now();
+          if (Date.now() - stableSince >= STABLE_MS) {
+            logInputDebug(target, lastFound.debug);
+            return { ok: true, found: lastFound };
+          }
+        } else {
+          lastSig = sig;
+          stableSince = Date.now();
+        }
       } else {
-        scrollPaneDown(mainRoot());
+        lastSig = sig;
+        stableSince = null;
       }
-      await sleep(250);
-      last = findTempAndPressure(target);
-      if (last.temperature && last.pressure) break;
+      await sleep(100);
     }
-    logInputDebug(target, last.debug);
-    return last;
+    logInputDebug(target, lastFound.debug);
+    if (!paneShowsEnergy(target)) return { ok: false, found: lastFound, error: 'nav failed' };
+    return { ok: false, found: lastFound, error: null };
+  }
+
+  async function tryClickAndWait(el, what, energy, target, before, perTryMs) {
+    const chain = clickableChain(el, energy);
+    if (!chain.length && el) chain.push(el);
+    for (const node of chain) {
+      if (!canActivate(node)) {
+        if (node && isForbiddenClickText(norm(node.innerText || ''))) log('REFUSED to click', what || 'forbidden');
+        continue;
+      }
+      dispatchPointerClick(node);
+      log('clicked', what || 'item');
+      const ready = await waitForPaneReady(target, before, perTryMs || 2500);
+      if (ready.ok) return ready;
+    }
+    return { ok: false, error: 'nav failed' };
   }
 
   async function goToTarget(target) {
-    let energyEl = findEnergyTreeRow(target.energy, target.group);
+    const before = inputSnapshot(target);
+    if (before.alreadyTarget) {
+      const ready = await waitForPaneReady(target, before, NAV_WAIT_MS);
+      return ready.ok || (ready.found && (ready.found.temperature || ready.found.pressure))
+        ? { found: ready.found || before.found, via: 'already', error: ready.ok ? null : null }
+        : { found: ready.found, via: 'already', error: ready.error };
+    }
+
     let via = 'tree';
-    if (!energyEl) {
+    let rows = findEnergyTreeRows(target.energy, target.group);
+    if (!rows.length) {
       const groupEl = findGroupItem(target.group);
       if (!groupEl) return { error: 'group not found' };
-      if (!safeClick(groupEl, target.group)) return { error: 'group click refused' };
+      if (!safeActivate(groupEl, target.group, null)) return { error: 'group click refused' };
       await sleep(400);
-      energyEl = await waitFor(() => findEnergyTreeRow(target.energy, target.group), 3000);
+      rows = await waitFor(() => {
+        const list = findEnergyTreeRows(target.energy, target.group);
+        return list.length ? list : null;
+      }, 3000) || [];
     }
-    if (!energyEl) {
-      energyEl = await waitFor(() => findEnergyTab(target.energy), 4000);
-      via = 'tab';
+    for (const row of rows) {
+      const ready = await tryClickAndWait(row, 'tree ' + target.energy, target.energy, target, before, 2500);
+      if (ready.ok) return { found: ready.found, via: 'tree' };
+      if (paneShowsEnergy(target)) {
+        const again = await waitForPaneReady(target, before, 5000);
+        if (again.ok) return { found: again.found, via: 'tree' };
+        return { found: again.found, via: 'tree', error: again.error };
+      }
     }
-    if (!energyEl) return { error: 'energy row not found' };
-    if (!safeClick(energyEl, via + ' ' + target.energy)) return { error: 'energy click refused' };
-    await sleep(400);
-    const found = await revealAndFindInputs(target);
-    return { found, via };
+
+    via = 'tab';
+    let tabs = findEnergyTabs(target.energy);
+    if (!tabs.length) tabs = await waitFor(() => {
+      const list = findEnergyTabs(target.energy);
+      return list.length ? list : null;
+    }, 2000) || [];
+    for (const tab of tabs) {
+      const ready = await tryClickAndWait(tab, 'tab ' + target.energy, target.energy, target, before, 2500);
+      if (ready.ok) return { found: ready.found, via: 'tab' };
+    }
+    const late = await waitForPaneReady(target, before, 4000);
+    if (late.ok) return { found: late.found, via: via };
+    if (!rows.length && !tabs.length) return { error: 'energy row not found', found: late.found };
+    return { error: 'nav failed', found: late.found, via };
+  }
+
+  async function fillFound(target, found, tVal, pVal) {
+    const scanned = found && found.debug ? found.debug.inputsScanned : 0;
+    const errs = [];
+    if (!found || !found.temperature) errs.push('no temperature input (' + scanned + ' inputs scanned)');
+    else {
+      const e = await setIfNeeded('Temperature', found.temperature, tVal);
+      if (e) errs.push(e);
+    }
+    if (!found || !found.pressure) errs.push('no pressure input (' + scanned + ' inputs scanned)');
+    else {
+      const e = await setIfNeeded('Pressure', found.pressure, pVal);
+      if (e) errs.push(e);
+    }
+    if (!errs.length) {
+      const late = await verifyAfterSettle(target, tVal, pVal);
+      if (late.length) return late;
+    }
+    return errs;
   }
 
   async function runFill(temperature, pressure) {
@@ -672,6 +939,8 @@
     saveStore(t, p);
     const failed = [];
     let ok = 0;
+    for (const tg of TARGETS) energyProgress[targetName(tg)] = '…';
+    renderProgress();
     log('start fill', TARGETS.length, 'targets');
     for (let i = 0; i < TARGETS.length; i++) {
       if (aborted || !pageHasPeace()) {
@@ -680,26 +949,29 @@
       }
       const target = TARGETS[i];
       const name = targetName(target);
-      setStatus('Filling ' + (i + 1) + ' of 10: ' + name + '…');
+      setEnergyProgress(name, 'navigating…');
       log('filling', (i + 1) + '/10');
       const nav = await goToTarget(target);
-      if (nav.error) { failed.push(name + ' (' + nav.error + ')'); log('fail'); continue; }
-      const found = nav.found;
-      const errs = [];
-      const scanned = found && found.debug ? found.debug.inputsScanned : 0;
-      if (!found || !found.temperature) errs.push('no temperature input (' + scanned + ' inputs scanned)');
-      else {
-        const e = await setIfNeeded('Temperature', found.temperature, t);
-        if (e) errs.push(e);
+      if (nav.error === 'nav failed' || nav.error === 'group not found' || nav.error === 'energy row not found' || nav.error === 'group click refused') {
+        failed.push(name + ' (' + nav.error + ')');
+        setEnergyProgress(name, nav.error, 'error');
+        continue;
       }
-      if (!found || !found.pressure) errs.push('no pressure input (' + scanned + ' inputs scanned)');
-      else {
-        const e = await setIfNeeded('Pressure', found.pressure, p);
-        if (e) errs.push(e);
+      if (!nav.error) setEnergyProgress(name, 'nav ok');
+      const found = nav.found || findTempAndPressure(target);
+      if (!paneShowsEnergy(target)) {
+        failed.push(name + ' (nav failed)');
+        setEnergyProgress(name, 'nav failed', 'error');
+        continue;
       }
-      if (!errs.length) { ok++; log('ok'); }
-      else { failed.push(name + ' (' + errs.join(', ') + ')'); log('fail'); }
-      await sleep(250);
+      const errs = await fillFound(target, found, t, p);
+      if (!errs.length) {
+        ok++;
+        setEnergyProgress(name, 'filled', 'ok');
+      } else {
+        failed.push(name + ' (' + errs.join(', ') + ')');
+        setEnergyProgress(name, errs.join(', '), 'error');
+      }
     }
     filling = false;
     const summary = ok + ' of 10 filled' + (failed.length ? '. Failed: ' + failed.join('; ') : '.');
@@ -734,7 +1006,8 @@
       '<label style="display:block;margin:8px 0 3px">Or paste both (e.g. 22.3 101.2)</label>' +
       '<input class="sc-tp-paste" type="text" placeholder="22.3 101.2" style="width:100%;box-sizing:border-box;padding:6px 8px;font-size:16px">' +
       '<button class="sc-tp-fill" type="button" style="margin-top:10px;width:100%;padding:8px 10px;font-size:16px;font-weight:bold;background:#1565c0;color:#fff;border:0;border-radius:6px;cursor:pointer">Fill</button>' +
-      '<div id="suncheck-tp-status" style="margin-top:8px;font-size:13px;min-height:1.3em">Enter values, then Fill. 10 energies.</div>';
+      '<div id="suncheck-tp-status" style="margin-top:8px;font-size:13px;min-height:1.3em">Enter values, then Fill. 10 energies.</div>' +
+      '<div id="suncheck-tp-progress" style="margin-top:8px;font-size:12px;line-height:1.35;max-height:11em;overflow:auto;white-space:pre-wrap"></div>';
     const temp = panel.querySelector('.sc-tp-temp');
     const press = panel.querySelector('.sc-tp-press');
     const paste = panel.querySelector('.sc-tp-paste');
@@ -805,9 +1078,11 @@
   if (typeof globalThis !== 'undefined' && globalThis.TP_FILL_TEST) {
     globalThis.TP_FILL_API = {
       findTempAndPressure, findEnergySection, findEnergyTreeRow, findEnergyTab,
-      findGroupItem, classifyInput, kindFromAttrs, kindFromNearby, collectNearby,
-      isEditableInput, isPtpInput, energyLabelMatches, isGroupLabel, targetName,
-      SCRIPT_VERSION, TARGETS, PANEL_ID, BTN_ID
+      findEnergyTreeRows, findEnergyTabs, findGroupItem, classifyInput, kindFromAttrs,
+      kindFromNearby, collectNearby, isEditableInput, isPtpInput, energyLabelMatches,
+      isGroupLabel, targetName, readPaneEnergy, paneShowsEnergy, goToTarget,
+      waitForPaneReady, dispatchPointerClick, clickableChain, layoutSignature,
+      isPresentInDom, SCRIPT_VERSION, TARGETS, PANEL_ID, BTN_ID, NAV_WAIT_MS, STABLE_MS, POST_FILL_MS
     };
     return;
   }

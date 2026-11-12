@@ -124,6 +124,7 @@ check('temp label unit', temperatureLabelMatches('Temperature (C)'), true);
 check('temp not room sentence', temperatureLabelMatches('Room Temperature coefficient'), false);
 check('press label', pressureLabelMatches('Pressure'), true);
 check('press label units', pressureLabelMatches('Pressure (kPa or mmHg)'), true);
+check('press label mmHg after fill', pressureLabelMatches('Pressure (mmHg)'), true);
 check('press not other', pressureLabelMatches('Pressure coefficient'), false);
 
 check('attr temperature', kindFromAttrs('temperature'), 'temperature');
@@ -151,8 +152,8 @@ check('gate absent', pageHasPeace('Daily | Other Machine', 'Safety Checks'), fal
 check('gate not Bravos', pageHasPeace('Daily | HDR_Bravos', 'HDR Daily'), false);
 
 const src = fs.readFileSync(path.join(__dirname, '..', 'suncheck-tp-fill.user.js'), 'utf8');
-check('script @version 1.1', /@version\s+1\.1\b/.test(src), true);
-check('script SCRIPT_VERSION', /const SCRIPT_VERSION = '1\.1'/.test(src), true);
+check('script @version 1.2', /@version\s+1\.2\b/.test(src), true);
+check('script SCRIPT_VERSION', /const SCRIPT_VERSION = '1\.2'/.test(src), true);
 check('script name TP Fill', /@name\s+TP Fill/.test(src), true);
 check('script gate Peace', /const GATE_RE = \/peace\/i/.test(src), true);
 check('script 10 targets', (src.match(/group: 'Photon constancy'/g) || []).length === 5 && (src.match(/group: 'Electron constancy'/g) || []).length === 5, true);
@@ -171,6 +172,11 @@ const goTo = src.indexOf('async function goToTarget');
 const treeCall = src.indexOf('findEnergyTreeRow', goTo);
 const tabCall = src.indexOf('findEnergyTab', goTo);
 check('tree row nav is primary (before tab fallback)', goTo !== -1 && treeCall !== -1 && tabCall !== -1 && treeCall < tabCall, true);
+check('script waits for pane energy', src.includes('function paneShowsEnergy') && src.includes('function readPaneEnergy') && src.includes('waitForPaneReady'), true);
+check('script pointer click sequence', src.includes('pointerdown') && src.includes('mousedown') && src.includes('mouseup'), true);
+check('script does not self-scroll in wait', src.includes('function waitForPaneReady') && !/function waitForPaneReady[\s\S]{0,1200}scrollIntoView/.test(src), true);
+check('loop continues after nav failure', /nav failed[\s\S]{0,250}continue/.test(src) && src.includes('of 10 filled'), true);
+check('post-fill wait', src.includes('POST_FILL_MS') && src.includes('verifyAfterSettle'), true);
 
 function loadJsdom() {
   const tries = ['jsdom', '/tmp/jsdom-root/node_modules/jsdom', path.join(__dirname, '../node_modules/jsdom')];
@@ -306,10 +312,87 @@ if (!jsdom) {
     const tab = api.findEnergyTab('6 MV');
     check('tab fallback still finds a tab', !!(tab && tab.closest('main')), true);
   }
+
+  // Async pane swap: clicking a tree row later changes the header energy and inputs (same layout, new content).
+  // The right pane also "auto-scrolls"; goToTarget must wait for the energy label and a stable layout, and must not fill the old 6 MV inputs.
+  {
+    const html = `
+      <nav class="tree">
+        <div>
+          <div>Photon constancy</div>
+          <div class="child" id="row-6">6 MV</div>
+          <div class="child" id="row-10">10 MV</div>
+        </div>
+      </nav>
+      <main id="pane" style="height:200px;overflow:auto">
+        <section id="dose">
+          <div class="h">Dosimetry - Photon constancy <b id="energy-label">6 MV</b></div>
+          <div>Temperature</div><input id="t-cur" type="text" value="21"><span>C</span>
+          <div>Pressure (mmHg)</div><input id="p-cur" type="text" value="756"><span>mmHg</span>
+        </section>
+      </main>`;
+    const { api, document, window } = loadApi(html);
+    const pane = document.getElementById('pane');
+    const row10 = document.getElementById('row-10');
+    let swapAt = 0;
+    let swapped = false;
+    const swap = () => {
+      if (swapped) return;
+      swapped = true;
+      swapAt = Date.now();
+      document.getElementById('energy-label').textContent = '10 MV';
+      const tInp = document.getElementById('t-cur') || document.getElementById('t-10');
+      const pInp = document.getElementById('p-cur') || document.getElementById('p-10');
+      if (tInp) { tInp.id = 't-10'; tInp.value = ''; }
+      if (pInp) { pInp.id = 'p-10'; pInp.value = ''; }
+      if (pInp && pInp.previousElementSibling) pInp.previousElementSibling.textContent = 'Pressure (kPa or mmHg)';
+      pane.scrollTop = 40;
+      setTimeout(() => { pane.scrollTop = 120; }, 80);
+      setTimeout(() => { pane.scrollTop = 120; }, 200);
+    };
+    row10.addEventListener('click', () => { setTimeout(swap, 150); });
+    row10.addEventListener('mousedown', () => { /* same handler path as a real click sequence */ });
+    const started = Date.now();
+    const target10 = { group: 'Photon constancy', energy: '10 MV' };
+    check('pane starts at 6 MV', api.readPaneEnergy('Photon constancy'), '6 MV');
+    const result = api.goToTarget(target10);
+    // goToTarget is async
+    Promise.resolve(result).then(nav => {
+      const elapsedAfterSwap = Date.now() - (swapAt || started);
+      check('async swap: nav ok', !!(nav && !nav.error && nav.found), true);
+      check('async swap: pane energy is 10 MV', api.readPaneEnergy('Photon constancy'), '10 MV');
+      check('async swap: found 10 MV temp, not stale 6 MV values', !!(nav.found && nav.found.temperature && nav.found.temperature.id === 't-10' && nav.found.temperature.value === ''), true);
+      check('async swap: found 10 MV press', !!(nav.found && nav.found.pressure && nav.found.pressure.id === 'p-10'), true);
+      check('async swap: waited until after delayed render', swapAt > 0 && Date.now() >= swapAt, true);
+      check('async swap: waited for settle after swap', elapsedAfterSwap >= 250, true);
+      finish();
+    }).catch(err => {
+      check('async swap: goToTarget threw', String(err && err.message || err), 'no throw');
+      finish();
+    });
+    return; // finish() after the promise
+  }
 }
 
-if (failed) {
-  console.error(failed + ' failed');
-  process.exit(1);
+function finish() {
+  if (failed) {
+    console.error(failed + ' failed');
+    process.exit(1);
+  }
+  console.log('all tests passed');
 }
-console.log('all tests passed');
+
+
+if (typeof finish === 'function' && !jsdom) {
+  if (failed) {
+    console.error(failed + ' failed');
+    process.exit(1);
+  }
+  console.log('all tests passed');
+} else if (!jsdom) {
+  if (failed) {
+    console.error(failed + ' failed');
+    process.exit(1);
+  }
+  console.log('all tests passed');
+}
