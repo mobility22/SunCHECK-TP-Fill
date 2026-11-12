@@ -15,11 +15,6 @@ const UNIT_C_RE = /^°?C$/i;
 const UNIT_PRESS_RE = /kPa|mmHg/i;
 const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
 
-function parsePaste(text) {
-  const m = norm(text).match(/^(-?\d+(?:\.\d+)?)\s*[,;]\s*(-?\d+(?:\.\d+)?)$/)
-    || norm(text).match(/^(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)$/);
-  return m ? { temperature: m[1], pressure: m[2] } : null;
-}
 function valuesEqual(a, b) {
   const sa = String(a ?? '').trim(), sb = String(b ?? '').trim();
   if (sa === sb) return true;
@@ -60,9 +55,6 @@ function check(name, got, expected) {
   console.log((ok ? 'PASS' : 'FAIL') + ' ' + name + ' got ' + JSON.stringify(got) + ' expected ' + JSON.stringify(expected));
 }
 
-check('paste spaces', parsePaste('22.3 101.2'), { temperature: '22.3', pressure: '101.2' });
-check('paste comma', parsePaste('22.3, 101.2'), { temperature: '22.3', pressure: '101.2' });
-check('paste one number', parsePaste('22.3'), null);
 check('values equal numeric', valuesEqual('22.3', '22.300'), true);
 check('temp label', temperatureLabelMatches('Temperature'), true);
 check('press kPa or mmHg', pressureLabelMatches('Pressure (kPa or mmHg)'), true);
@@ -77,9 +69,10 @@ check('summary short', formatSummary(4, 4, 4, 4).indexOf('scroll to the bottom')
 check('summary extra', formatSummary(12, 12, 12, 12).indexOf('expected 10') !== -1, true);
 
 const src = fs.readFileSync(path.join(__dirname, '..', 'suncheck-tp-fill.user.js'), 'utf8');
-check('script @version 1.3', /@version\s+1\.3\b/.test(src), true);
-check('script SCRIPT_VERSION', /const SCRIPT_VERSION = '1\.3'/.test(src), true);
+check('script @version 1.4', /@version\s+1\.4\b/.test(src), true);
+check('script SCRIPT_VERSION', /const SCRIPT_VERSION = '1\.4'/.test(src), true);
 check('script closed shadow', src.includes("attachShadow({ mode: 'closed' })") && src.includes('data-label') && src.includes('::before'), true);
+check('script has no paste field or parser', !src.includes('sc-tp-paste') && !src.includes('function parsePaste') && !src.includes('applyPaste') && !src.includes('Or paste both'), true);
 check('script primary path has no required click', src.includes('start fill (scan all inputs, no navigation)'), true);
 check('script fallback only if short', src.includes('fewer than') && src.includes('tree-row fallback'), true);
 check('PHI-free log: no innerText dump in log()', /log\([^)]*innerText/.test(src), false);
@@ -177,6 +170,8 @@ function testPanelAndExtras() {
     check('panel uses closed shadow root', !!(root && root.mode === 'closed'), true);
     const labels = root ? [...root.querySelectorAll('[data-label]')].map(el => el.getAttribute('data-label')) : [];
     check('panel labels are data-label CSS content', labels.some(s => /Temperature/.test(s)) && labels.some(s => /Pressure/.test(s)), true);
+    check('panel has no paste field', !!(root && !root.querySelector('.sc-tp-paste') && !labels.some(s => /paste/i.test(s || ''))), true);
+    check('panel has temp, pressure, Fill, and status', !!(root && root.querySelector('.sc-tp-temp') && root.querySelector('.sc-tp-press') && root.querySelector('.sc-tp-fill') && root.getElementById('suncheck-tp-status')), true);
     const scanned = api.findAllClassifiedInputs();
     check('panel inputs excluded from scan', scanned.temps.length === 0 && scanned.presses.length === 0, true);
   }

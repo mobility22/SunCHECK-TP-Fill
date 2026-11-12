@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TP Fill
 // @namespace    https://github.com/mobility22/SunCHECK-TP-Fill
-// @version      1.3
+// @version      1.4
 // @description  Fill SunCHECK Peace temperature and pressure on Photon/Electron constancy (never Approve/Submit)
 // @match        http://cnrrtrocperfx.rrt.ca.kp.org/*
 // @match        https://cnrrtrocperfx.rrt.ca.kp.org/*
@@ -13,7 +13,7 @@
 (function () {
   'use strict';
   const TAG = '[TP Fill]';
-  const SCRIPT_VERSION = '1.3';
+  const SCRIPT_VERSION = '1.4';
   const log = (...a) => console.log(TAG, ...a);
   const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -58,11 +58,6 @@
   const today = () => { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); };
   const norm = s => String(s || '').replace(/\s+/g, ' ').trim();
 
-  function parsePaste(text) {
-    const m = norm(text).match(/^(-?\d+(?:\.\d+)?)\s*[,;]\s*(-?\d+(?:\.\d+)?)$/)
-      || norm(text).match(/^(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)$/);
-    return m ? { temperature: m[1], pressure: m[2] } : null;
-  }
   function valuesEqual(a, b) {
     const sa = String(a ?? '').trim(), sb = String(b ?? '').trim();
     if (sa === sb) return true;
@@ -728,19 +723,6 @@
     catch (e) { log('could not remember values'); }
   }
 
-  function applyPaste(raw) {
-    const parsed = parsePaste(raw);
-    if (!parsed) return false;
-    const root = panelRoot();
-    if (!root) return false;
-    const tIn = root.querySelector('.sc-tp-temp');
-    const pIn = root.querySelector('.sc-tp-press');
-    if (tIn) tIn.value = parsed.temperature;
-    if (pIn) pIn.value = parsed.pressure;
-    log('parsed paste');
-    return true;
-  }
-
   function addPanel() {
     if (document.getElementById(PANEL_ID)) return;
     const stored = loadStore();
@@ -767,24 +749,15 @@
       '<input class="sc-tp-temp" type="text" inputmode="decimal" aria-label="T">' +
       '<span class="lbl sp" data-label="Pressure (kPa or mmHg)"></span>' +
       '<input class="sc-tp-press" type="text" inputmode="decimal" aria-label="P">' +
-      '<span class="lbl sp" data-label="Or paste both (e.g. 22.3 101.2)"></span>' +
-      '<input class="sc-tp-paste" type="text" placeholder="22.3 101.2">' +
       '<button class="sc-tp-fill" type="button">Fill</button>' +
       '<div id="suncheck-tp-status">Enter values, then Fill. Looks for every T and P box on the page.</div>' +
       '</div>';
     const temp = panelShadow.querySelector('.sc-tp-temp');
     const press = panelShadow.querySelector('.sc-tp-press');
-    const paste = panelShadow.querySelector('.sc-tp-paste');
     temp.value = stored.temperature;
     press.value = stored.pressure;
-    paste.addEventListener('input', () => { if (applyPaste(paste.value)) paste.style.borderColor = '#2e7d32'; });
-    paste.addEventListener('paste', ev => {
-      const raw = (ev.clipboardData && ev.clipboardData.getData('text')) || '';
-      if (applyPaste(raw)) { ev.preventDefault(); paste.value = raw.trim(); }
-    });
     panelShadow.querySelector('.sc-tp-fill').addEventListener('click', ev => {
       ev.preventDefault(); ev.stopPropagation();
-      if (paste.value && applyPaste(paste.value)) { /* fields updated */ }
       runFill(temp.value, press.value).catch(err => { filling = false; setStatus('Fill error', 'error'); log('fill error'); });
     });
     document.body.appendChild(panel);
@@ -844,7 +817,7 @@
     globalThis.TP_FILL_API = {
       findAllClassifiedInputs, classifyInput, kindFromAttrs, kindFromNearby,
       collectNearby, isEditableInput, isPtpInput, energyLabelMatches, isGroupLabel,
-      temperatureLabelMatches, pressureLabelMatches, parsePaste, valuesEqual,
+      temperatureLabelMatches, pressureLabelMatches, valuesEqual,
       formatSummary, runFill, fillInputs, setAndVerify, readPaneEnergy,
       findEnergyTreeRows, pageHasPeace, addPanel, panelRoot, SCRIPT_VERSION,
       EXPECTED_COUNT, PANEL_ID, BTN_ID, TARGETS
